@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <title>Ludo 3D</title>
+  <meta name="description" content="A 3D Ludo board game for mobile and desktop. Play against the computer, pass & play, or online with friends.">
+  <meta name="theme-color" content="#1b1d3a">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Ludo 3D">
+  <link rel="manifest" href="./manifest.webmanifest">
+  <link rel="icon" href="./icons/icon.svg" type="image/svg+xml">
+  <link rel="icon" href="./icons/icon-192.png" sizes="192x192" type="image/png">
+  <link rel="apple-touch-icon" href="./icons/apple-touch-icon.png">
+  <link rel="stylesheet" href="./css/style.css">
+</head>
+<body>
+  <div id="bg" aria-hidden="true">
+    <i class="blob b1"></i><i class="blob b2"></i><i class="blob b3"></i><i class="blob b4"></i><i class="blob b5"></i>
+    <i class="rays"></i><i class="stars"></i><i class="stars s2"></i><i class="turn-glow"></i>
+    <i class="beams"></i><canvas id="bgfx"></canvas><i class="flash"></i>
+  </div>
+  <canvas id="c" aria-label="Ludo board"></canvas>
+
+  <!-- In-game HUD -->
+  <div id="hud" class="hidden">
+    <div class="topbar">
+      <button id="btnPause" class="icon-btn" aria-label="Menu">
+        <svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+      </button>
+      <div id="roomTag" class="room-tag hidden"></div>
+      <div class="topbar-right">
+        <button id="btnEmoji" class="icon-btn hidden" aria-label="Send emoji">
+          <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M8.5 14.5a4.5 4.5 0 0 0 7 0M9 9.5h.01M15 9.5h.01"/></svg>
+        </button>
+        <button id="btnSound" class="icon-btn" aria-label="Toggle sound">
+          <svg class="on" viewBox="0 0 24 24"><path d="M4 9v6h4l5 4V5L8 9z"/><path d="M16 8.5a5 5 0 0 1 0 7M18.5 6a8.5 8.5 0 0 1 0 12"/></svg>
+          <svg class="off" viewBox="0 0 24 24"><path d="M4 9v6h4l5 4V5L8 9z"/><path d="M17 9l5 6M22 9l-5 6"/></svg>
+        </button>
+      </div>
+    </div>
+    <div id="chips"></div>
+    <div id="toast" aria-live="polite"></div>
+    <div id="emojiPanel" class="emoji-panel hidden"></div>
+    <div id="fx"></div>
+    <div class="bottombar">
+      <div id="hint" class="hint"></div>
+    </div>
+  </div>
+
+  <!-- Menu -->
+  <section id="scrMenu" class="screen">
+    <div class="card menu-card">
+      <h1 class="logo"><span style="--c:#e53935">L</span><span style="--c:#2fae4f">U</span><span style="--c:#f9c623">D</span><span style="--c:#1e88e5">O</span><small>3D</small></h1>
+      <button id="btnContinue" class="btn btn-ghost hidden">Continue game</button>
+      <button id="btnVsCpu" class="btn btn-primary">
+        <svg viewBox="0 0 24 24"><rect x="5" y="8" width="14" height="11" rx="3"/><path d="M12 4v4M9 13h.01M15 13h.01"/></svg>
+        Play vs Computer
+      </button>
+      <button id="btnLocal" class="btn btn-green">
+        <svg viewBox="0 0 24 24"><circle cx="8" cy="8" r="3"/><circle cx="16" cy="8" r="3"/><path d="M2 20c0-3.3 2.7-6 6-6s6 2.7 6 6M12 20c0-3.3 1.8-6 4-6s6 2.7 6 6"/></svg>
+        Pass &amp; Play
+      </button>
+      <button id="btnOnline" class="btn btn-blue">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3.5 3 14.5 0 18M12 3c-3 3.5-3 14.5 0 18"/></svg>
+        Play Online
+      </button>
+      <div class="row">
+        <button id="btnHelp" class="btn btn-ghost small">How to play</button>
+        <button id="btnSettings" class="btn btn-ghost small">Settings</button>
+      </div>
+      <button id="btnInstall" class="btn btn-ghost small hidden">⬇ Install app</button>
+    </div>
+  </section>
+
+  <!-- Local game setup -->
+  <section id="scrSetup" class="screen hidden">
+    <div class="card">
+      <h2 id="setupTitle">New game</h2>
+      <div id="seatRows" class="seat-rows"></div>
+      <label class="field">
+        <span>Computer skill</span>
+        <div class="seg" id="segLevel">
+          <button data-v="easy">Easy</button><button data-v="normal">Normal</button><button data-v="hard">Hard</button>
+        </div>
+      </label>
+      <p id="setupErr" class="err"></p>
+      <button id="btnStart" class="btn btn-primary">Start game</button>
+      <button class="btn btn-ghost small" data-back>Back</button>
+    </div>
+  </section>
+
+  <!-- Online -->
+  <section id="scrOnline" class="screen hidden">
+    <div class="card">
+      <h2>Play online</h2>
+      <label class="field"><span>Your name</span><input id="inpName" maxlength="14" autocomplete="nickname" placeholder="Player"></label>
+      <button id="btnCreate" class="btn btn-primary">Create room</button>
+      <div class="divider"><span>or join a friend</span></div>
+      <div class="join-row">
+        <input id="inpCode" maxlength="5" placeholder="CODE" autocapitalize="characters" autocomplete="off" spellcheck="false">
+        <button id="btnJoin" class="btn btn-blue">Join</button>
+      </div>
+      <p id="onlineMsg" class="err"></p>
+      <button class="btn btn-ghost small" data-back>Back</button>
+    </div>
+  </section>
+
+  <!-- Lobby -->
+  <section id="scrLobby" class="screen hidden">
+    <div class="card">
+      <h2>Room</h2>
+      <div class="code-box"><span id="lobbyCode">-----</span>
+        <button id="btnShare" class="btn btn-ghost small">Share link</button>
+      </div>
+      <p class="muted" id="lobbyNote">Share the code. Friends join from “Play Online”.</p>
+      <div id="lobbySeats" class="seat-rows"></div>
+      <p id="lobbyMsg" class="err"></p>
+      <button id="btnLobbyStart" class="btn btn-primary">Start game</button>
+      <button id="btnLobbyLeave" class="btn btn-ghost small">Leave</button>
+    </div>
+  </section>
+
+  <!-- Pause -->
+  <section id="scrPause" class="screen hidden">
+    <div class="card">
+      <h2>Paused</h2>
+      <button id="btnResume" class="btn btn-primary">Resume</button>
+      <button id="btnRestart" class="btn btn-ghost">Restart game</button>
+      <button id="btnPauseSettings" class="btn btn-ghost">Settings</button>
+      <button id="btnQuit" class="btn btn-ghost">Quit to menu</button>
+    </div>
+  </section>
+
+  <!-- Game over -->
+  <section id="scrOver" class="screen hidden">
+    <div class="card">
+      <h2 id="overTitle">Game over</h2>
+      <ol id="ranking" class="ranking"></ol>
+      <button id="btnAgain" class="btn btn-primary">Play again</button>
+      <button id="btnOverMenu" class="btn btn-ghost">Main menu</button>
+    </div>
+  </section>
+
+  <!-- Settings -->
+  <section id="scrSettings" class="screen hidden">
+    <div class="card">
+      <h2>Settings</h2>
+      <label class="toggle"><span>Sound effects</span><input type="checkbox" data-set="sound"><i></i></label>
+      <label class="toggle"><span>Vibration</span><input type="checkbox" data-set="vibrate"><i></i></label>
+      <label class="toggle"><span>Auto-move when only one choice</span><input type="checkbox" data-set="autoMove"><i></i></label>
+      <label class="toggle"><span>Lucky dice<br><small>more sixes &amp; captures, for everyone</small></span><input type="checkbox" data-set="lucky"><i></i></label>
+      <label class="toggle"><span>Fast computer turns</span><input type="checkbox" data-set="fast"><i></i></label>
+      <label class="toggle"><span>High quality graphics<br><small>applies after reload</small></span><input type="checkbox" data-set="hq"><i></i></label>
+      <button class="btn btn-primary" data-back>Done</button>
+    </div>
+  </section>
+
+  <!-- Help -->
+  <section id="scrHelp" class="screen hidden">
+    <div class="card help">
+      <h2>How to play</h2>
+      <ul>
+        <li>Roll a <b>6</b> to bring a pawn out of your yard onto your start square.</li>
+        <li>Move pawns clockwise around the board, then up your coloured home lane. You need the <b>exact</b> roll to reach home.</li>
+        <li>Land on an opponent to <b>capture</b> it and send it back to its yard.</li>
+        <li>Squares with a <b>star</b> and every start square are safe: no captures there.</li>
+        <li>Rolling a 6, capturing, or getting a pawn home earns <b>another roll</b>. Three 6s in a row ends your turn.</li>
+        <li>First to bring all four pawns home wins.</li>
+      </ul>
+      <p class="muted">Tap the <b>ROLL</b> button or the die to roll, then tap a glowing token. Drag to rotate the board, pinch or scroll to zoom.</p>
+      <p class="muted">Install on iPhone: Share → <i>Add to Home Screen</i>.</p>
+      <button class="btn btn-primary" data-back>Got it</button>
+    </div>
+  </section>
+
+  <div id="loading" class="loading">Loading…</div>
+
+  <script type="module" src="./js/main.js"></script>
+</body>
+</html>
