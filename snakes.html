@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <title>Snakes &amp; Ladders 3D</title>
+  <meta name="description" content="A 3D Snakes & Ladders board game for mobile and desktop. Easy, medium, hard or a random board, against the computer or pass & play.">
+  <meta name="theme-color" content="#1b1d3a">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Snakes 3D">
+  <link rel="manifest" href="./manifest.webmanifest">
+  <link rel="icon" href="./icons/icon.svg" type="image/svg+xml">
+  <link rel="icon" href="./icons/icon-192.png" sizes="192x192" type="image/png">
+  <link rel="apple-touch-icon" href="./icons/apple-touch-icon.png">
+  <link rel="stylesheet" href="./css/style.css">
+  <link rel="stylesheet" href="./css/snakes.css">
+</head>
+<body class="snakes">
+  <div id="bg" aria-hidden="true">
+    <i class="blob b1"></i><i class="blob b2"></i><i class="blob b3"></i><i class="blob b4"></i><i class="blob b5"></i>
+    <i class="rays"></i><i class="stars"></i><i class="stars s2"></i><i class="turn-glow"></i>
+    <i class="beams"></i><canvas id="bgfx"></canvas><i class="flash"></i>
+  </div>
+  <canvas id="c" aria-label="Snakes and Ladders board"></canvas>
+
+  <!-- In-game HUD -->
+  <div id="hud" class="hidden">
+    <div class="topbar">
+      <button id="btnPause" class="icon-btn" aria-label="Menu">
+        <svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+      </button>
+      <div id="boardTag" class="room-tag"></div>
+      <div class="topbar-right">
+        <button id="btnSound" class="icon-btn" aria-label="Toggle sound">
+          <svg class="on" viewBox="0 0 24 24"><path d="M4 9v6h4l5 4V5L8 9z"/><path d="M16 8.5a5 5 0 0 1 0 7M18.5 6a8.5 8.5 0 0 1 0 12"/></svg>
+          <svg class="off" viewBox="0 0 24 24"><path d="M4 9v6h4l5 4V5L8 9z"/><path d="M17 9l5 6M22 9l-5 6"/></svg>
+        </button>
+      </div>
+    </div>
+    <div id="chips"></div>
+    <div id="toast" aria-live="polite"></div>
+    <div id="fx"></div>
+    <div class="bottombar">
+      <div id="hint" class="hint"></div>
+    </div>
+  </div>
+
+  <!-- Menu -->
+  <section id="scrMenu" class="screen">
+    <div class="card menu-card">
+      <nav class="game-tabs" aria-label="Choose a game">
+        <a href="./index.html">🎲 Ludo</a>
+        <a href="./snakes.html" class="on" aria-current="page">🐍 Snakes &amp; Ladders</a>
+      </nav>
+      <h1 class="logo sl-logo">
+        <span style="--c:#43a047">S</span><span style="--c:#fdd835">N</span><span style="--c:#e53935">A</span><span style="--c:#1e88e5">K</span><span style="--c:#8e24aa">E</span><span style="--c:#fb8c00">S</span>
+        <em>&amp; <b>LADDERS</b></em><small>3D</small>
+      </h1>
+      <button id="btnContinue" class="btn btn-ghost hidden">Continue game</button>
+      <button id="btnVsCpu" class="btn btn-primary">
+        <svg viewBox="0 0 24 24"><rect x="5" y="8" width="14" height="11" rx="3"/><path d="M12 4v4M9 13h.01M15 13h.01"/></svg>
+        Play vs Computer
+      </button>
+      <button id="btnLocal" class="btn btn-green">
+        <svg viewBox="0 0 24 24"><circle cx="8" cy="8" r="3"/><circle cx="16" cy="8" r="3"/><path d="M2 20c0-3.3 2.7-6 6-6s6 2.7 6 6M12 20c0-3.3 1.8-6 4-6s6 2.7 6 6"/></svg>
+        Pass &amp; Play
+      </button>
+      <div class="row">
+        <button id="btnHelp" class="btn btn-ghost small">How to play</button>
+        <button id="btnSettings" class="btn btn-ghost small">Settings</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- Setup -->
+  <section id="scrSetup" class="screen hidden">
+    <div class="card">
+      <h2 id="setupTitle">New game</h2>
+      <div id="seatRows" class="seat-rows"></div>
+      <label class="field">
+        <span>Board</span>
+        <div class="seg" id="segBoard">
+          <button data-v="easy">Easy</button><button data-v="medium">Medium</button><button data-v="hard">Hard</button><button data-v="random">🎲 Random</button>
+        </div>
+      </label>
+      <div class="preview-wrap">
+        <canvas id="preview" width="360" height="360" aria-label="Board preview"></canvas>
+        <div class="preview-info">
+          <span id="previewStats"></span>
+          <button id="btnShuffle" class="btn btn-ghost small hidden">🔀 Shuffle</button>
+        </div>
+      </div>
+      <p id="setupErr" class="err"></p>
+      <button id="btnStart" class="btn btn-primary">Start game</button>
+      <button class="btn btn-ghost small" data-back>Back</button>
+    </div>
+  </section>
+
+  <!-- Pause -->
+  <section id="scrPause" class="screen hidden">
+    <div class="card">
+      <h2>Paused</h2>
+      <button id="btnResume" class="btn btn-primary">Resume</button>
+      <button id="btnRestart" class="btn btn-ghost">Restart game</button>
+      <button id="btnPauseSettings" class="btn btn-ghost">Settings</button>
+      <button id="btnQuit" class="btn btn-ghost">Quit to menu</button>
+    </div>
+  </section>
+
+  <!-- Game over -->
+  <section id="scrOver" class="screen hidden">
+    <div class="card">
+      <h2 id="overTitle">Game over</h2>
+      <ol id="ranking" class="ranking"></ol>
+      <button id="btnAgain" class="btn btn-primary">Play again</button>
+      <button id="btnNewBoard" class="btn btn-ghost">New random board</button>
+      <button id="btnOverMenu" class="btn btn-ghost">Main menu</button>
+    </div>
+  </section>
+
+  <!-- Settings -->
+  <section id="scrSettings" class="screen hidden">
+    <div class="card">
+      <h2>Settings</h2>
+      <label class="toggle"><span>Sound effects</span><input type="checkbox" data-set="sound"><i></i></label>
+      <label class="toggle"><span>Vibration</span><input type="checkbox" data-set="vibrate"><i></i></label>
+      <label class="toggle"><span>Need a 6 to start<br><small>applies to new games</small></span><input type="checkbox" data-set="needSix"><i></i></label>
+      <label class="toggle"><span>Bounce back from 100<br><small>off: overshoot means you stay put</small></span><input type="checkbox" data-set="bounce"><i></i></label>
+      <label class="toggle"><span>Fast computer turns</span><input type="checkbox" data-set="fast"><i></i></label>
+      <label class="toggle"><span>High quality graphics<br><small>applies after reload</small></span><input type="checkbox" data-set="hq"><i></i></label>
+      <button class="btn btn-primary" data-back>Done</button>
+    </div>
+  </section>
+
+  <!-- Help -->
+  <section id="scrHelp" class="screen hidden">
+    <div class="card help">
+      <h2>How to play</h2>
+      <ul>
+        <li>Everyone starts on the <b>START</b> pad. Roll the die and move that many squares, 1 → 100.</li>
+        <li>Land at the foot of a <b>ladder</b> 🪜 and you climb straight up it.</li>
+        <li>Land on a <b>snake's head</b> 🐍 and it swallows you: you slide down to its tail.</li>
+        <li>Rolling a <b>6</b> gives you another roll. Three 6s in a row ends your turn.</li>
+        <li>You need the <b>exact</b> roll to land on 100 (or bounce back, if you turned that on in Settings).</li>
+        <li>First to reach <b>100</b> wins!</li>
+      </ul>
+      <p class="muted">Boards: <b>Easy</b> has lots of ladders, <b>Hard</b> is full of long snakes, and <b>Random</b> builds a new board each time.</p>
+      <p class="muted">Tap the die on your badge, the 3D die or the board to roll (Space on a keyboard). Drag to rotate, pinch or scroll to zoom.</p>
+      <button class="btn btn-primary" data-back>Got it</button>
+    </div>
+  </section>
+
+  <div id="loading" class="loading">Loading…</div>
+
+  <script type="module" src="./js/snakes/main.js"></script>
+</body>
+</html>

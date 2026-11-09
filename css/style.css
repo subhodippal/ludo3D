@@ -81,6 +81,15 @@ h2 { margin: 0 0 4px; font-size: 24px; text-align: center; }
 .btn-primary { background: linear-gradient(180deg, #ff8f4d, #f0582a); }
 .btn-green { background: linear-gradient(180deg, #3cc464, #22914a); }
 .btn-blue { background: linear-gradient(180deg, #3aa0f5, #1667c7); }
+/* game switcher tabs: Ludo (left) | Snakes & Ladders (right) */
+.game-tabs { display: flex; background: rgba(0,0,0,.3); border-radius: 16px; padding: 4px; gap: 4px; margin-bottom: 4px; }
+.game-tabs a {
+  flex: 1; text-align: center; text-decoration: none; color: var(--muted); font-weight: 800; font-size: 15px;
+  padding: 11px 6px; border-radius: 12px; white-space: nowrap; transition: background .2s, color .2s;
+}
+.game-tabs a:hover { color: #fff; }
+.game-tabs a.on { color: #fff; background: linear-gradient(180deg, #ff8f4d, #f0582a); box-shadow: 0 3px 0 rgba(0,0,0,.3); pointer-events: none; }
+.game-tabs a:last-child.on { background: linear-gradient(180deg, #a35cf0, #6a2bc4); }
 .btn-ghost { background: rgba(255,255,255,.1); box-shadow: none; border: 1px solid rgba(255,255,255,.12); }
 .btn.small { padding: 10px 14px; font-size: 15px; font-weight: 700; }
 .row { display: flex; gap: 10px; }

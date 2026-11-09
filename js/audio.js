@@ -133,6 +133,53 @@ class Sfx {
   click() { this._tone({ freq: 1200, to: 800, type: 'square', dur: 0.04, vol: 0.06 }); }
   error() { this._tone({ freq: 220, to: 160, type: 'square', dur: 0.15, vol: 0.08 }); }
 
+  // ---- Snakes & Ladders
+  // one rung of a ladder climb; pitch rises with each step
+  climb(step = 0) {
+    const f = 520 * Math.pow(2, Math.min(step, 24) / 12);
+    this._tone({ freq: f, type: 'triangle', dur: 0.1, vol: 0.18 });
+    this._tone({ freq: f * 2, type: 'sine', dur: 0.06, vol: 0.05, delay: 0.02 });
+  }
+
+  // snake hiss: filtered noise swell
+  hiss(dur = 0.9) {
+    if (!this.ok) return;
+    const t0 = this.ctx.currentTime;
+    const src = this.ctx.createBufferSource();
+    src.buffer = this._noise;
+    src.loop = true;
+    const f = this.ctx.createBiquadFilter();
+    f.type = 'highpass';
+    f.frequency.value = 3800;
+    const g = this.ctx.createGain();
+    g.gain.setValueAtTime(0.0001, t0);
+    g.gain.exponentialRampToValueAtTime(0.32, t0 + 0.12);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    src.connect(f).connect(g).connect(this.master);
+    src.start(t0);
+    src.stop(t0 + dur + 0.05);
+  }
+
+  chomp() {
+    this._noiseHit({ dur: 0.08, vol: 0.4, freq: 900, q: 1 });
+    this._tone({ freq: 140, to: 60, type: 'square', dur: 0.16, vol: 0.18 });
+    this.buzz([50, 30, 50]);
+  }
+
+  // long descending slide down the snake
+  slide(dur = 1.2) {
+    this._tone({ freq: 900, to: 120, type: 'sawtooth', dur, vol: 0.09 });
+    this._tone({ freq: 450, to: 70, type: 'sine', dur, vol: 0.18 });
+  }
+
+  // triumphant rising arpeggio at the top of a ladder
+  ladderTop() {
+    [523, 659, 784, 1047, 1319].forEach((f, i) => this._tone({ freq: f, type: 'triangle', dur: 0.2, vol: 0.18, delay: i * 0.05 }));
+    this.buzz(25);
+  }
+
+  boing() { this._tone({ freq: 300, to: 160, type: 'sine', dur: 0.25, vol: 0.2 }); this._tone({ freq: 160, to: 420, type: 'triangle', dur: 0.18, vol: 0.12, delay: 0.2 }); }
+
   win() {
     const notes = [523, 659, 784, 1047, 784, 1047, 1319];
     notes.forEach((f, i) => {

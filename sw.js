@@ -1,11 +1,17 @@
 // Service worker: cache-first app shell so the game works offline.
 // Bump VERSION whenever you deploy changes.
-const VERSION = 'ludo3d-v11';
+const VERSION = 'ludo3d-v15';
 const ASSETS = [
   './',
   './index.html',
   './manifest.webmanifest',
   './css/style.css',
+  './snakes.html',
+  './css/snakes.css',
+  './js/fx3d.js',
+  './js/snakes/main.js',
+  './js/snakes/scene.js',
+  './js/snakes/rules.js',
   './js/main.js',
   './js/board.js',
   './js/dice.js',
@@ -52,10 +58,9 @@ self.addEventListener('fetch', (e) => {
   if (req.mode === 'navigate') {
     e.respondWith(
       fetch(req).then((res) => {
-        const copy = res.clone();
-        caches.open(VERSION).then((c) => c.put('./index.html', copy));
+        if (res.ok) { const copy = res.clone(); caches.open(VERSION).then((c) => c.put(req, copy)); }
         return res;
-      }).catch(() => caches.match('./index.html')),
+      }).catch(() => caches.match(req, { ignoreSearch: true }).then((r) => r || caches.match('./index.html'))),
     );
     return;
   }

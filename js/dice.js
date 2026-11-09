@@ -8,8 +8,6 @@ import * as CANNON from '../vendor/cannon-es.js';
 import { RoundedBoxGeometry } from '../vendor/RoundedBoxGeometry.js';
 import { sfx } from './audio.js';
 
-const SIZE = 0.9;
-const HALF = SIZE / 2;
 const STEP = 1 / 120;
 
 // local face normals per value (BoxGeometry material order +x,-x,+y,-y,+z,-z)
@@ -60,7 +58,10 @@ function faceTexture(value, renderer) {
 }
 
 export class Dice {
-  constructor(scene, renderer, { halfX = 7.45, halfZ = 7.45, floorY = 0 } = {}) {
+  constructor(scene, renderer, { halfX = 7.45, halfZ = 7.45, floorY = 0, size = 0.9 } = {}) {
+    const SIZE = size;
+    const HALF = size / 2;
+    this.half = HALF;
     this.floorY = floorY;
     this.bounds = { halfX, halfZ };
 
@@ -116,7 +117,7 @@ export class Dice {
     });
 
     // --- visual
-    const geo = new RoundedBoxGeometry(SIZE, SIZE, SIZE, 5, 0.13);
+    const geo = new RoundedBoxGeometry(SIZE, SIZE, SIZE, 5, 0.13 * SIZE / 0.9);
     const mats = MATERIAL_ORDER.map((v) => new THREE.MeshStandardMaterial({
       map: faceTexture(v, renderer), roughness: 0.32, metalness: 0.0,
     }));
@@ -129,7 +130,7 @@ export class Dice {
     this.materials = mats;
 
     // glow ring when it's your turn to roll
-    const ringGeo = new THREE.RingGeometry(0.62, 0.78, 40);
+    const ringGeo = new THREE.RingGeometry(0.69 * SIZE, 0.87 * SIZE, 40);
     ringGeo.rotateX(-Math.PI / 2);
     this.ring = new THREE.Mesh(ringGeo, new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0, depthWrite: false }));
     this.ring.position.set(0, floorY + 0.02, 0);
@@ -223,7 +224,7 @@ export class Dice {
     const p = this.playing;
     this._apply(p.frames[p.frames.length - 1]);
     // snap to perfectly flat
-    this.mesh.position.y = this.floorY + HALF;
+    this.mesh.position.y = this.floorY + this.half;
     this.playing = null;
     p.resolve(this.value);
   }

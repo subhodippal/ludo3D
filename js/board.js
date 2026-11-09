@@ -10,6 +10,7 @@ import {
 import { Dice } from './dice.js';
 import { tween, ease, updateTweens } from './anim.js';
 import { sfx } from './audio.js';
+import { Fx3D } from './fx3d.js';
 
 const toWorld = ([c, r], y = 0) => new THREE.Vector3(c - 7, y, r - 7);
 
@@ -245,7 +246,7 @@ export class Scene3D {
     this.dice = new Dice(scene, renderer, { halfX: 7.45, halfZ: 7.45, floorY: 0 });
     this.tokens = [];
     this.selectable = new Map(); // mesh group -> {player, token}
-    this.effects = [];
+    this.fx = new Fx3D(scene, { confettiColors: Object.values(COLOR_HEX).concat([0xffffff, 0xff7ad9]) });
     this.turnPlayer = -1;
     this.view = { player: 0 };
     this.onTokenPick = null;
@@ -666,113 +667,13 @@ export class Scene3D {
     this.onBoardTap?.();
   }
 
-  // ---------- effects
-  burst(pos, color, n = 40, sphere = false) {
-    const geo = new THREE.BufferGeometry();
-    const p = new Float32Array(n * 3);
-    const v = [];
-    for (let i = 0; i < n; i++) {
-      p[i * 3] = pos.x; p[i * 3 + 1] = pos.y + 0.4; p[i * 3 + 2] = pos.z;
-      if (sphere) {
-        const dir = new THREE.Vector3().randomDirection().multiplyScalar(2.5 + Math.random() * 1.5);
-        v.push(dir);
-      } else {
-        const a = Math.random() * Math.PI * 2, s = 1.5 + Math.random() * 3;
-        v.push(new THREE.Vector3(Math.cos(a) * s, 3 + Math.random() * 4, Math.sin(a) * s));
-      }
-    }
-    geo.setAttribute('position', new THREE.BufferAttribute(p, 3));
-    const mat = new THREE.PointsMaterial({ color, size: sphere ? 0.2 : 0.16, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending });
-    const pts = new THREE.Points(geo, mat);
-    this.scene.add(pts);
-    this.effects.push({ obj: pts, v, life: sphere ? 1.4 : 1.1, age: 0, kind: 'burst', g: sphere ? 3 : 12 });
-  }
-
-  // expanding ring on the board
-  shockwave(pos, color = 0xffffff, size = 3.2) {
-    const geo = new THREE.RingGeometry(0.42, 0.55, 48).rotateX(-Math.PI / 2);
-    const mat = new THREE.MeshBasicMaterial({ color, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide });
-    const m = new THREE.Mesh(geo, mat);
-    m.position.set(pos.x, 0.03, pos.z);
-    this.scene.add(m);
-    this.effects.push({ obj: m, life: 0.75, age: 0, kind: 'ring', size });
-  }
-
-  fireworks(pos, colors) {
-    for (let i = 0; i < 4; i++) {
-      setTimeout(() => {
-        const p = new THREE.Vector3(pos.x + (Math.random() - 0.5) * 3, 2.5 + Math.random() * 2, pos.z + (Math.random() - 0.5) * 3);
-        this.burst(p, colors[i % colors.length], 60, true);
-      }, i * 220);
-    }
-  }
-
-  // player colour plus lighter tints, for colour-matched fireworks
-  shades(hex) {
-    const c = new THREE.Color(hex);
-    return [hex, c.clone().lerp(new THREE.Color(0xffffff), 0.35).getHex(), hex, c.clone().lerp(new THREE.Color(0xffffff), 0.6).getHex()];
-  }
-
+  // ---------- effects (shared implementation in fx3d.js)
+  burst(pos, color, n = 40, sphere = false) { this.fx.burst(pos, color, n, sphere); }
+  shockwave(pos, color = 0xffffff, size = 3.2) { this.fx.shockwave(pos, color, size); }
+  fireworks(pos, colors) { this.fx.fireworks(pos, colors); }
+  shades(hex) { return this.fx.shades(hex); }
   shake(strength = 0.4) { this._shake = { t: 0, life: 0.45, s: strength }; }
-
-  confetti() {
-    const n = 260;
-    const geo = new THREE.PlaneGeometry(0.16, 0.26);
-    const mat = new THREE.MeshBasicMaterial({ side: THREE.DoubleSide, transparent: true });
-    const mesh = new THREE.InstancedMesh(geo, mat, n);
-    const palette = Object.values(COLOR_HEX).concat([0xffffff, 0xff7ad9]);
-    const items = [];
-    const c = new THREE.Color();
-    for (let i = 0; i < n; i++) {
-      c.setHex(palette[i % palette.length]);
-      mesh.setColorAt(i, c);
-      items.push({
-        p: new THREE.Vector3((Math.random() - 0.5) * 16, 8 + Math.random() * 10, (Math.random() - 0.5) * 16),
-        v: new THREE.Vector3((Math.random() - 0.5) * 1.5, -1.5 - Math.random() * 2, (Math.random() - 0.5) * 1.5),
-        r: new THREE.Euler(Math.random() * 6, Math.random() * 6, Math.random() * 6),
-        w: new THREE.Vector3(Math.random() * 6, Math.random() * 6, Math.random() * 6),
-      });
-    }
-    this.scene.add(mesh);
-    this.effects.push({ obj: mesh, items, life: 7, age: 0, kind: 'confetti' });
-  }
-
-  _updateEffects(dt) {
-    const m4 = new THREE.Matrix4();
-    const q = new THREE.Quaternion();
-    const one = new THREE.Vector3(1, 1, 1);
-    this.effects = this.effects.filter((e) => {
-      e.age += dt;
-      if (e.age >= e.life) { this.scene.remove(e.obj); e.obj.geometry.dispose(); e.obj.material.dispose(); return false; }
-      if (e.kind === 'ring') {
-        const k = e.age / e.life;
-        e.obj.scale.setScalar(1 + k * e.size * 2);
-        e.obj.material.opacity = 1 - k;
-      } else if (e.kind === 'burst') {
-        const pos = e.obj.geometry.attributes.position;
-        e.v.forEach((v, i) => {
-          v.y -= e.g * dt;
-          pos.array[i * 3] += v.x * dt; pos.array[i * 3 + 1] += v.y * dt; pos.array[i * 3 + 2] += v.z * dt;
-          if (pos.array[i * 3 + 1] < 0.02) { pos.array[i * 3 + 1] = 0.02; v.y *= -0.3; v.x *= 0.7; v.z *= 0.7; }
-        });
-        pos.needsUpdate = true;
-        e.obj.material.opacity = 1 - e.age / e.life;
-      } else {
-        e.items.forEach((it, i) => {
-          it.p.addScaledVector(it.v, dt);
-          it.p.x += Math.sin(e.age * 3 + i) * dt * 0.8;
-          if (it.p.y < 0.02) { it.p.y = 0.02; it.v.set(0, 0, 0); it.w.set(0, 0, 0); }
-          it.r.x += it.w.x * dt; it.r.y += it.w.y * dt; it.r.z += it.w.z * dt;
-          q.setFromEuler(it.r);
-          m4.compose(it.p, q, one);
-          e.obj.setMatrixAt(i, m4);
-        });
-        e.obj.instanceMatrix.needsUpdate = true;
-        if (e.age > e.life - 1) e.obj.material.opacity = e.life - e.age;
-      }
-      return true;
-    });
-  }
+  confetti() { this.fx.confetti(); }
 
   _loop(now) {
     const dt = Math.min(0.05, (now - (this._last || now)) / 1000);
@@ -796,7 +697,7 @@ export class Scene3D {
       const target = p === this.turnPlayer ? 0.16 + Math.sin(t * 3) * 0.08 : 0;
       m.material.opacity += (target - m.material.opacity) * 0.1;
     });
-    this._updateEffects(dt);
+    this.fx.update(dt);
     let off = null;
     if (this._shake) {
       const sh = this._shake;

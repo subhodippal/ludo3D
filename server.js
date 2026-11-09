@@ -8,7 +8,7 @@ const path = require('path');
 const os = require('os');
 
 const ROOT = __dirname;
-const PORT = Number(process.env.PORT) || 8080;
+const PORT = Number(process.env.PORT) || 8081;
 const HOST = process.env.HOST || '0.0.0.0';
 
 const MIME = {

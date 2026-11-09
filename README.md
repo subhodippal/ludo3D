@@ -17,7 +17,20 @@ It's a static site with no build step, so it can be hosted on GitHub Pages as-is
 - **PWA:** installable and works offline (except online play). Local games auto-save and can be continued later.
 - **Controls:** touch and mouse. Tap the dice on your player badge (or the 3D die), then tap a glowing token. Drag to orbit and pinch or scroll to zoom. On a keyboard, Space rolls and 1–4 picks a pawn.
 
-## Rules used
+## Snakes & Ladders 3D
+
+A second game lives at `snakes.html` (there's a button for it on the Ludo menu, and a "Play Ludo" button to go back).
+
+- **Boards:** three fixed boards (**Easy**: 9 ladders and 5 short snakes, **Medium**: balanced, **Hard**: 11 long snakes) plus **Random**, which builds a new valid board every time. The setup screen shows a mini map, and you can shuffle the random board until you like it.
+- **Players:** 2–4, any mix of humans and computers (pass & play on one device).
+- **3D board:** rainbow tiles that ripple and glow under the pawns, a neon frame with chasing bulbs, and a floating trophy on 100.
+- **Snakes** wriggle all the time and flick their tongues. When you land on a head, the snake rears up, swallows your pawn, a bulge slides down its body and it spits you out at the tail.
+- **Ladders** have a golden pulse running up the rungs. Your pawn climbs rung by rung with rising notes and lands at the top with fireworks.
+- **Celebrations:** banners, emoji bursts, background firecrackers for sixes, ladders and the win, and a red vignette with screen shake for snake bites.
+- **Rules:** a 6 gives another roll, and three 6s in a row ends your turn. You need the exact roll to land on 100. Settings can turn on "need a 6 to start" and "bounce back from 100".
+- Games auto-save and can be continued later.
+
+## Rules used (Ludo)
 
 - You need a 6 to bring a pawn out.
 - Rolling a 6, capturing a pawn or getting a pawn home gives you another roll. Three 6s in a row ends your turn.
@@ -58,6 +71,11 @@ The game will be at `https://<you>.github.io/ludo3d/`. All paths are relative, s
 index.html              UI shell (menus, HUD)
 css/style.css           Mobile-first styles
 js/main.js              Game controller: modes, turns, UI, online sync
+snakes.html, css/snakes.css   Snakes & Ladders page
+js/snakes/rules.js      Snakes & Ladders boards, random generator, rules engine
+js/snakes/scene.js      Snakes & Ladders three.js scene and animations
+js/snakes/main.js       Snakes & Ladders controller
+js/fx3d.js              Shared 3D particle effects (bursts, rings, confetti)
 js/game.js              Pure deterministic rules engine
 js/ai.js                Computer opponent heuristics
 js/board.js             three.js scene: board, pawns, camera, picking, effects
