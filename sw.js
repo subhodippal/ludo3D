@@ -1,6 +1,6 @@
 // Service worker: cache-first app shell so the game works offline.
 // Bump VERSION whenever you deploy changes.
-const VERSION = 'ludo3d-v15';
+const VERSION = 'ludo3d-v20';
 const ASSETS = [
   './',
   './index.html',
@@ -9,6 +9,8 @@ const ASSETS = [
   './snakes.html',
   './css/snakes.css',
   './js/fx3d.js',
+  './js/bgdice.js',
+  './js/viewctl.js',
   './js/snakes/main.js',
   './js/snakes/scene.js',
   './js/snakes/rules.js',

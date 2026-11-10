@@ -7,6 +7,7 @@ import { wait, flushTweens } from '../anim.js';
 import { COLORS, COLOR_CSS, COLOR_NAME } from '../constants.js';
 import * as bgfx from '../bgfx.js';
 import { fairDie } from '../luck.js';
+import { initViewControls } from '../viewctl.js';
 
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
@@ -60,6 +61,8 @@ function toast(text, color = null, dur = 1.8) {
   setTimeout(() => el.remove(), dur * 1000 + 400);
   while ($('#toast').children.length > 3) $('#toast').firstChild.remove();
 }
+
+initViewControls(view, { toast, onClick: () => sfx.click() });
 
 // ---------------------------------------------------------------- session
 /** @type {null | {players:any[], board:string, game:SnakesGame, mySeats:Set<number>, busy:boolean, paused?:boolean, over?:boolean, timer?:any}} */

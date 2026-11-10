@@ -142,6 +142,7 @@ export class SnakesScene {
       minPolarAngle: 0.05, maxPolarAngle: 1.15, rotateSpeed: 0.6, zoomSpeed: 0.8,
     });
     this.controls.target.set(0, 0, 0.45);
+    this.mode = '3d';
 
     scene.add(new THREE.HemisphereLight(0xfff6e8, 0x40384a, 0.95));
     const sun = new THREE.DirectionalLight(0xffffff, 2.3);
@@ -792,13 +793,31 @@ export class SnakesScene {
     const h = this.canvas.clientHeight || window.innerHeight;
     const aspect = w / h;
     const portrait = aspect < 1;
-    const polar = portrait ? 0.5 : 0.6;
     const vf = THREE.MathUtils.degToRad(this.camera.fov);
     const hf = 2 * Math.atan(Math.tan(vf / 2) * aspect);
-    const R = 5.9;
-    const dW = (R / Math.tan(hf / 2)) * (portrait ? 1.05 : 1.0) + R * Math.sin(polar) * 0.5;
-    const dV = ((R * Math.cos(polar) + 1.4) / Math.tan(vf / 2)) * (portrait ? 1.0 : 1.16);
+    if (this.mode === '2d') {
+      // straight down: the 10x10 board plus the START pad below it
+      const R = portrait ? 5.3 : 5.6;
+      const dW = R / Math.tan(hf / 2), dV = (R + (portrait ? 0.3 : 0.9)) / Math.tan(vf / 2);
+      return { dist: Math.max(dW, dV) + 0.2, polar: 0.001 };
+    }
+    const polar = portrait ? 0.5 : 0.6;
+    // phones in portrait are width-bound: let the board run nearly edge to edge
+    const R = portrait ? 5.5 : 5.7;
+    const dW = (R / Math.tan(hf / 2)) + R * Math.sin(polar) * (portrait ? 0.3 : 0.5);
+    const dV = ((R * Math.cos(polar) + 1.2) / Math.tan(vf / 2)) * (portrait ? 1.0 : 1.1);
     return { dist: Math.max(dW, dV), polar };
+  }
+
+  // '3d' = tilted, orbitable view; '2d' = flat top-down view with rotation locked
+  setMode(mode, animate = true) {
+    this.mode = mode === '2d' ? '2d' : '3d';
+    const flat = this.mode === '2d';
+    Object.assign(this.controls, {
+      enableRotate: !flat, minPolarAngle: flat ? 0 : 0.05, maxPolarAngle: flat ? 0.002 : 1.15,
+    });
+    if (this.controls.autoRotate) return Promise.resolve();
+    return this.setView(animate);
   }
 
   setView(animate = true) {

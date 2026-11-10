@@ -7,6 +7,7 @@ import { HostNet, ClientNet } from './net.js';
 import { COLORS, COLOR_CSS, COLOR_HEX, COLOR_NAME, SEATS_FOR, STAR_INDICES, trackIndexFor } from './constants.js';
 import * as bgfx from './bgfx.js';
 import { luckyRoll, fairDie } from './luck.js';
+import { initViewControls } from './viewctl.js';
 
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
@@ -60,6 +61,8 @@ function toast(text, color = null, dur = 1.8) {
   setTimeout(() => el.remove(), dur * 1000 + 400);
   while ($('#toast').children.length > 3) $('#toast').firstChild.remove();
 }
+
+initViewControls(view, { toast, onClick: () => sfx.click() });
 
 // ---------------------------------------------------------------- session
 /** @type {null | {mode:'local'|'host'|'client', players:any[], level:string, game:LudoGame, mySeats:Set<number>, queue:any[], busy:boolean, net?:any, paused?:boolean, over?:boolean, timer?:any}} */

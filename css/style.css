@@ -164,6 +164,16 @@ input:focus { border-color: #8fb4ff; }
 }
 .topbar > * { pointer-events: auto; }
 .topbar-right { display: flex; gap: 8px; }
+.view-seg {
+  display: flex; height: 44px; padding: 3px; gap: 2px; border-radius: 14px; border: 1px solid rgba(255,255,255,.14);
+  background: rgba(20,22,48,.6); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+}
+.view-seg button {
+  min-width: 38px; padding: 0 8px; border: 0; border-radius: 11px; background: transparent;
+  color: rgba(255,255,255,.65); font: inherit; font-size: 14px; font-weight: 800; letter-spacing: .5px; cursor: pointer;
+}
+.view-seg button.on { color: #fff; background: linear-gradient(180deg, #ff8f4d, #f0582a); box-shadow: 0 2px 0 rgba(0,0,0,.3); }
+.view-seg button:active { transform: scale(.94); }
 .room-tag { font-size: 13px; font-weight: 800; letter-spacing: 2px; background: rgba(20,22,48,.6); padding: 6px 10px; border-radius: 10px; }
 
 .chip {

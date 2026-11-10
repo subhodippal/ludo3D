@@ -11,6 +11,7 @@ import { Dice } from './dice.js';
 import { tween, ease, updateTweens } from './anim.js';
 import { sfx } from './audio.js';
 import { Fx3D } from './fx3d.js';
+import { BgDice } from './bgdice.js';
 
 const toWorld = ([c, r], y = 0) => new THREE.Vector3(c - 7, y, r - 7);
 
@@ -40,7 +41,12 @@ function boardTexture(renderer, size) {
   const cv = document.createElement('canvas');
   cv.width = cv.height = N;
   const g = cv.getContext('2d');
-  g.fillStyle = '#fbf6ec';
+  const line = '#2b2b2b';
+  const lw = Math.max(2, N / 520);
+  // printed ink: a touch deeper than the token colours so the lit board stays saturated
+  const ink = Object.fromEntries(COLORS.map((c) => [c, shade(COLOR_HEX[c], 0.86)]));
+
+  g.fillStyle = '#ffffff';
   g.fillRect(0, 0, N, N);
 
   const cellRect = ([c, r], fill) => {
@@ -48,28 +54,26 @@ function boardTexture(renderer, size) {
     g.fillRect(c * C, r * C, C, C);
   };
 
-  // track
-  TRACK.forEach((cell) => cellRect(cell, '#fffdf8'));
+  // home columns + start squares in solid colour
   COLORS.forEach((col, p) => {
-    const css = COLOR_CSS[col];
+    const css = ink[col];
     HOME_COLUMN[p].forEach((cell) => cellRect(cell, css));
     cellRect(TRACK[START_INDEX[p]], css);
   });
 
   // grid lines on track
-  g.strokeStyle = '#2d2a26';
-  g.lineWidth = Math.max(2, N / 700);
+  g.strokeStyle = line;
+  g.lineWidth = lw;
   [...TRACK, ...HOME_COLUMN.flat()].forEach(([c, r]) => g.strokeRect(c * C, r * C, C, C));
 
   // stars on safe squares
   STAR_INDICES.forEach((i) => {
     const [c, r] = TRACK[i];
-    drawStar(g, (c + 0.5) * C, (r + 0.5) * C, C * 0.36, C * 0.16, '#d9d2c3', '#9b927f');
+    drawStar(g, (c + 0.5) * C, (r + 0.5) * C, C * 0.34, C * 0.15, '#ffffff', '#6b6b6b');
   });
-  // start squares: white star
   COLORS.forEach((col, p) => {
     const [c, r] = TRACK[START_INDEX[p]];
-    drawStar(g, (c + 0.5) * C, (r + 0.5) * C, C * 0.36, C * 0.16, 'rgba(255,255,255,0.9)', null);
+    drawStar(g, (c + 0.5) * C, (r + 0.5) * C, C * 0.34, C * 0.15, '#ffffff', null);
   });
   // entry arrows into home column
   COLORS.forEach((col, p) => {
@@ -79,7 +83,7 @@ function boardTexture(renderer, size) {
     g.save();
     g.translate((c + 0.5) * C, (r + 0.5) * C);
     g.rotate(ang);
-    g.fillStyle = COLOR_CSS[col];
+    g.fillStyle = ink[col];
     g.beginPath();
     g.moveTo(C * 0.32, 0);
     g.lineTo(-C * 0.1, -C * 0.28);
@@ -93,46 +97,35 @@ function boardTexture(renderer, size) {
     g.restore();
   });
 
-  // yards
+  // yards: solid colour, white inner square, four coloured circles
   COLORS.forEach((col, p) => {
     const [ox, oy] = YARD_ORIGIN[p];
-    const css = COLOR_CSS[col];
-    const grad = g.createLinearGradient(ox * C, oy * C, (ox + 6) * C, (oy + 6) * C);
-    grad.addColorStop(0, shade(COLOR_HEX[col], 1.08));
-    grad.addColorStop(1, shade(COLOR_HEX[col], 0.85));
-    g.fillStyle = grad;
+    const css = ink[col];
+    g.fillStyle = css;
     g.fillRect(ox * C, oy * C, 6 * C, 6 * C);
-    // inner rounded square
     const pad = 0.75 * C;
-    const x = ox * C + pad, y = oy * C + pad, w = 6 * C - 2 * pad, rr = C * 0.5;
-    g.fillStyle = '#fffaf0';
+    const x = ox * C + pad, y = oy * C + pad, w = 6 * C - 2 * pad;
+    g.fillStyle = '#ffffff';
     g.beginPath();
-    g.roundRect(x, y, w, w, rr);
+    g.roundRect(x, y, w, w, C * 0.3);
     g.fill();
-    g.lineWidth = N / 400;
-    g.strokeStyle = shade(COLOR_HEX[col], 0.7);
+    g.lineWidth = lw;
+    g.strokeStyle = line;
     g.stroke();
     for (let t = 0; t < 4; t++) {
-      // empty socket: pale recessed hollow with a thin dashed ring,
-      // so it never looks like a token sitting there
       const [sc, sr] = yardSpot(p, t);
-      const cx = (sc + 0.5) * C, cy = (sr + 0.5) * C, R = C * 0.46;
-      const hole = g.createRadialGradient(cx, cy - R * 0.25, R * 0.2, cx, cy, R);
-      hole.addColorStop(0, '#fffdf8');
-      hole.addColorStop(0.75, '#f1ebdf');
-      hole.addColorStop(1, '#d9d0c0');
+      const cx = (sc + 0.5) * C, cy = (sr + 0.5) * C, R = C * 0.44;
       g.beginPath();
       g.arc(cx, cy, R, 0, Math.PI * 2);
-      g.fillStyle = hole;
+      g.fillStyle = css;
       g.fill();
-      g.setLineDash([C * 0.09, C * 0.06]);
-      g.lineWidth = N / 520;
-      g.strokeStyle = css;
-      g.stroke();
-      g.setLineDash([]);
+      g.beginPath();
+      g.arc(cx, cy, R * 0.72, 0, Math.PI * 2);
+      g.fillStyle = 'rgba(255,255,255,0.35)';
+      g.fill();
     }
-    g.strokeStyle = '#2d2a26';
-    g.lineWidth = Math.max(2, N / 700);
+    g.strokeStyle = line;
+    g.lineWidth = lw;
     g.strokeRect(ox * C, oy * C, 6 * C, 6 * C);
   });
 
@@ -144,45 +137,24 @@ function boardTexture(renderer, size) {
     g.lineTo(pts[1][0] * C, pts[1][1] * C);
     g.lineTo(m, m);
     g.closePath();
-    g.fillStyle = COLOR_CSS[col];
+    g.fillStyle = ink[col];
     g.fill();
-    g.strokeStyle = '#2d2a26';
+    g.strokeStyle = line;
+    g.lineWidth = lw;
     g.stroke();
   };
   tri([[6, 6], [6, 9]], 'red');
   tri([[6, 6], [9, 6]], 'green');
   tri([[9, 6], [9, 9]], 'yellow');
   tri([[6, 9], [9, 9]], 'blue');
-  drawStar(g, m, m, C * 0.45, C * 0.2, 'rgba(255,255,255,0.85)', null);
 
-  g.lineWidth = N / 250;
-  g.strokeStyle = '#2d2a26';
+  g.lineWidth = N / 300;
+  g.strokeStyle = line;
   g.strokeRect(0, 0, N, N);
 
   const tex = new THREE.CanvasTexture(cv);
   tex.colorSpace = THREE.SRGBColorSpace;
   tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
-  return tex;
-}
-
-function woodTexture() {
-  const cv = document.createElement('canvas');
-  cv.width = 512; cv.height = 128;
-  const g = cv.getContext('2d');
-  g.fillStyle = '#7a4a24';
-  g.fillRect(0, 0, 512, 128);
-  for (let i = 0; i < 70; i++) {
-    const y = Math.random() * 128;
-    g.strokeStyle = `rgba(${40 + Math.random() * 40},${20 + Math.random() * 20},10,${0.15 + Math.random() * 0.25})`;
-    g.lineWidth = 1 + Math.random() * 3;
-    g.beginPath();
-    g.moveTo(0, y);
-    for (let x = 0; x <= 512; x += 32) g.lineTo(x, y + Math.sin(x * 0.02 + i) * 3);
-    g.stroke();
-  }
-  const tex = new THREE.CanvasTexture(cv);
-  tex.colorSpace = THREE.SRGBColorSpace;
-  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
   return tex;
 }
 
@@ -243,12 +215,14 @@ export class Scene3D {
 
     this._buildBoard(quality);
     this._buildParty(quality);
+    this.bgDice = new BgDice(scene, this.camera);
     this.dice = new Dice(scene, renderer, { halfX: 7.45, halfZ: 7.45, floorY: 0 });
     this.tokens = [];
     this.selectable = new Map(); // mesh group -> {player, token}
     this.fx = new Fx3D(scene, { confettiColors: Object.values(COLOR_HEX).concat([0xffffff, 0xff7ad9]) });
     this.turnPlayer = -1;
     this.view = { player: 0 };
+    this.mode = '3d';
     this.onTokenPick = null;
     this.onDicePick = null;
 
@@ -268,33 +242,21 @@ export class Scene3D {
 
   _buildBoard(quality) {
     const { scene, renderer } = this;
-    const wood = woodTexture();
-    const woodMat = new THREE.MeshStandardMaterial({ map: wood, roughness: 0.55, metalness: 0.05 });
-    const boardMat = new THREE.MeshStandardMaterial({ map: boardTexture(renderer, quality === 'high' ? 2048 : 1024), roughness: 0.75 });
+    // laminated board: white edges, satin printed top
+    const edgeMat = new THREE.MeshStandardMaterial({ color: 0xf4f4f2, roughness: 0.55 });
+    const boardMat = new THREE.MeshStandardMaterial({
+      map: boardTexture(renderer, quality === 'high' ? 2048 : 1024), roughness: 0.7, envMapIntensity: 0.4,
+    });
 
-    const base = new THREE.Mesh(new THREE.BoxGeometry(15, 0.4, 15), [woodMat, woodMat, boardMat, woodMat, woodMat, woodMat]);
+    const base = new THREE.Mesh(new THREE.BoxGeometry(15, 0.4, 15), [edgeMat, edgeMat, boardMat, edgeMat, edgeMat, edgeMat]);
     base.position.y = -0.2;
     base.receiveShadow = true;
+    base.castShadow = true;
     scene.add(base);
-
-    // raised frame (doubles as the dice tray walls)
-    const fw = 0.55, fh = 0.75;
-    const frameGeo = new THREE.BoxGeometry(15 + fw * 2, fh, fw);
-    const sideGeo = new THREE.BoxGeometry(fw, fh, 15);
-    const mk = (geo, x, z) => {
-      const m = new THREE.Mesh(geo, woodMat);
-      m.position.set(x, fh / 2 - 0.4, z);
-      m.castShadow = true;
-      m.receiveShadow = true;
-      scene.add(m);
-    };
-    mk(frameGeo, 0, -7.5 - fw / 2);
-    mk(frameGeo, 0, 7.5 + fw / 2);
-    mk(sideGeo, -7.5 - fw / 2, 0);
-    mk(sideGeo, 7.5 + fw / 2, 0);
+    this.boardBase = base;
 
     // shadow-catching table
-    const ground = new THREE.Mesh(new THREE.PlaneGeometry(80, 80), new THREE.ShadowMaterial({ opacity: 0.35 }));
+    const ground = new THREE.Mesh(new THREE.PlaneGeometry(80, 80), new THREE.ShadowMaterial({ opacity: 0.35, depthWrite: false }));
     ground.rotation.x = -Math.PI / 2;
     ground.position.y = -0.41;
     ground.receiveShadow = true;
@@ -594,13 +556,30 @@ export class Scene3D {
     const h = this.canvas.clientHeight || window.innerHeight;
     const aspect = w / h;
     const portrait = aspect < 1;
-    const polar = portrait ? 0.5 : 0.62;
     const vf = THREE.MathUtils.degToRad(this.camera.fov);
     const hf = 2 * Math.atan(Math.tan(vf / 2) * aspect);
-    const R = 8.7;
-    const dW = (R / Math.tan(hf / 2)) * (portrait ? 1.06 : 1.0) + R * Math.sin(polar) * 0.5;
-    const dV = ((R * Math.cos(polar) + 1.2) / Math.tan(vf / 2)) * (portrait ? 1.0 : 1.18);
+    if (this.mode === '2d') {
+      // straight down: fit the 15x15 board (plus a hair of margin) to the short side
+      const R = portrait ? 7.75 : 8.1;
+      const dW = R / Math.tan(hf / 2), dV = (R + (portrait ? 0 : 0.9)) / Math.tan(vf / 2);
+      return { dist: Math.max(dW, dV) + 0.2, polar: 0.001 };
+    }
+    const polar = portrait ? 0.5 : 0.62;
+    // phones in portrait are width-bound: let the board run nearly edge to edge
+    const R = portrait ? 7.95 : 8.3;
+    const dW = (R / Math.tan(hf / 2)) + R * Math.sin(polar) * (portrait ? 0.3 : 0.5);
+    const dV = ((R * Math.cos(polar) + 1.0) / Math.tan(vf / 2)) * (portrait ? 1.0 : 1.12);
     return { dist: Math.max(dW, dV), polar };
+  }
+
+  // '3d' = tilted, orbitable view; '2d' = flat top-down view with rotation locked
+  setMode(mode, animate = true) {
+    this.mode = mode === '2d' ? '2d' : '3d';
+    const flat = this.mode === '2d';
+    Object.assign(this.controls, {
+      enableRotate: !flat, minPolarAngle: flat ? 0 : 0.05, maxPolarAngle: flat ? 0.002 : 1.12,
+    });
+    return this.setView(this.view.player, animate);
   }
 
   setView(player, animate = true) {
@@ -651,6 +630,10 @@ export class Scene3D {
 
     if (this._raycaster.intersectObject(this.dice.mesh, false).length) { this.onDicePick?.(); return; }
 
+    // background dice: tap to knock them about (the board occludes ones behind it)
+    const bg = this._raycaster.intersectObjects([this.boardBase, ...this.bgDice.meshes], false)[0];
+    if (bg && bg.object !== this.boardBase && this.bgDice.poke(bg.object)) return;
+
     if (this.selectable.size) {
       const hits = this._raycaster.intersectObjects([...this.selectable.keys()].map((g) => g.userData.hit), false);
       if (hits.length) { const g = hits[0].object.userData.owner; this.onTokenPick?.(this.selectable.get(g)); return; }
@@ -693,6 +676,7 @@ export class Scene3D {
       d.inner.position.y = d.sel ? Math.abs(Math.sin(t * 5)) * 0.18 : d.inner.position.y * 0.8;
     }
     this._updateParty(t, dt);
+    this.bgDice.update(dt);
     this.yardGlow.forEach((m, p) => {
       const target = p === this.turnPlayer ? 0.16 + Math.sin(t * 3) * 0.08 : 0;
       m.material.opacity += (target - m.material.opacity) * 0.1;
