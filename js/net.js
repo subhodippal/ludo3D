@@ -61,78 +61,6 @@ function friendlyError(err) {
   return err?.message || 'Connection error';
 }
 
-// ---------------------------------------------------------------- Wi-Fi groups
-// Browsers can't discover devices on the local network directly. But every
-// device on the same Wi-Fi shares one public address, which WebRTC's STUN
-// check reveals. We hash it into a short network key and give that network a
-// handful of well-known group slots on the broker; anyone on the same Wi-Fi
-// can probe those slots to list the groups nearby. Game data then flows
-// directly between the devices over the Wi-Fi.
-export const WIFI_SLOTS = 8;
-export const isWifiCode = (code) => typeof code === 'string' && code.startsWith('WIFI-');
-export const wifiCode = (key, slot) => `WIFI-${key}-${slot}`;
-
-let keyCache = null;
-export function wifiKey() {
-  if (keyCache) return keyCache;
-  keyCache = new Promise((res, rej) => {
-    let pc;
-    try { pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] }); } catch { rej(new Error('This browser does not support WebRTC.')); return; }
-    const found = { v4: null, v6: null };
-    let done = false;
-    const finish = () => {
-      if (done) return;
-      done = true;
-      pc.close();
-      // IPv6 addresses differ per device, so group by the /64 network prefix
-      const addr = found.v4 || (found.v6 && found.v6.split(':').slice(0, 4).join(':'));
-      if (!addr) { keyCache = null; rej(new Error('Could not detect your Wi-Fi network. Check the internet connection.')); return; }
-      let h = 0x811c9dc5; // FNV-1a
-      for (const ch of addr) { h ^= ch.charCodeAt(0); h = Math.imul(h, 0x01000193) >>> 0; }
-      res(h.toString(36).toUpperCase().padStart(7, '0'));
-    };
-    pc.onicecandidate = (e) => {
-      if (!e.candidate) { finish(); return; }
-      const c = e.candidate;
-      if (!/ typ srflx /.test(' ' + c.candidate + ' ') && c.type !== 'srflx') return;
-      const ip = c.address || c.candidate.split(' ')[4];
-      if (!ip) return;
-      if (ip.includes(':')) found.v6 = found.v6 || ip; else { found.v4 = ip; finish(); }
-    };
-    pc.createDataChannel('probe');
-    pc.createOffer().then((o) => pc.setLocalDescription(o)).catch(() => finish());
-    setTimeout(finish, 5000);
-  });
-  return keyCache;
-}
-
-// List the groups open on this Wi-Fi: [{ code, slot, name, players, max, started }]
-export async function scanWifi(key) {
-  await loadPeer();
-  const peer = new window.Peer({ debug: 0 });
-  await new Promise((res, rej) => {
-    const t = setTimeout(() => rej(new Error('Timed out reaching the matchmaking server.')), CONNECT_MS);
-    peer.on('open', () => { clearTimeout(t); res(); });
-    peer.on('error', (e) => { if (e.type !== 'peer-unavailable') { clearTimeout(t); rej(new Error(friendlyError(e))); } });
-  });
-  const probe = (slot) => new Promise((res) => {
-    const code = wifiCode(key, slot);
-    const conn = peer.connect(idFor(code, 0), { reliable: true });
-    const t = setTimeout(() => { try { conn.close(); } catch { /* never opened */ } res(null); }, 6000);
-    conn.on('open', () => conn.send({ t: 'info' }));
-    conn.on('data', (m) => {
-      if (m?.t !== 'info') return;
-      clearTimeout(t);
-      conn.close();
-      res({ code, slot, name: String(m.name || 'Host').slice(0, 14), players: m.players | 0, max: m.max | 0, started: !!m.started });
-    });
-    conn.on('error', () => {});
-  });
-  const list = (await Promise.all([...Array(WIFI_SLOTS).keys()].map(probe))).filter(Boolean);
-  peer.destroy();
-  return list;
-}
-
 export class HostNet {
   constructor() { this.conns = new Map(); this.seen = new Map(); this.handlers = {}; live.add(this); }
   on(ev, fn) { this.handlers[ev] = fn; return this; }
@@ -151,25 +79,6 @@ export class HostNet {
       // lost the broker (not the players): quietly re-register
       peer.on('disconnected', () => { if (!peer.destroyed) setTimeout(() => { if (!peer.destroyed && peer.disconnected) peer.reconnect(); }, 1000); });
     });
-  }
-
-  // Open a Wi-Fi group: claim the first free slot for this network.
-  async startWifi(key) {
-    await loadPeer();
-    for (let slot = 0; slot < WIFI_SLOTS; slot++) {
-      const c = wifiCode(key, slot);
-      try {
-        await this._open(idFor(c, 0));
-        this.code = c;
-        this.epoch = 0;
-        this._beat();
-        return c;
-      } catch (err) {
-        this.peer?.destroy();
-        if (err.type !== 'unavailable-id') throw new Error(friendlyError(err));
-      }
-    }
-    throw new Error('Too many groups on this Wi-Fi. Join one of them instead.');
   }
 
   // New room, or (with `code`) re-open a room after a reload under the next
