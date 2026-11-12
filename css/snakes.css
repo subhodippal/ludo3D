@@ -78,3 +78,7 @@ body.snakes #bg .b2 { background: radial-gradient(circle, var(--c2), transparent
 body.snakes #bg .b3 { background: radial-gradient(circle, var(--c3), transparent 62%); }
 body.snakes #bg .b4 { background: radial-gradient(circle, var(--c4), transparent 62%); }
 body.snakes #bg .b5 { background: radial-gradient(circle, var(--c5), transparent 60%); }
+
+/* 2D view: plain and still. Stop the drifting backdrop and its effects */
+body.flat-view #bg *, body.flat-view #bg *::before, body.flat-view #bg *::after { animation: none !important; transition: none !important; }
+body.flat-view #bg .rays, body.flat-view #bg .beams, body.flat-view #bg .flash { display: none; }

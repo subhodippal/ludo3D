@@ -7,7 +7,7 @@ import { HostNet, ClientNet } from './net.js';
 import { COLORS, COLOR_CSS, COLOR_HEX, COLOR_NAME, SEATS_FOR, STAR_INDICES, trackIndexFor } from './constants.js';
 import * as bgfx from './bgfx.js';
 import { luckyRoll, fairDie } from './luck.js';
-import { initViewControls } from './viewctl.js';
+import { initViewControls, initOrientationSetting } from './viewctl.js';
 
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
@@ -22,6 +22,15 @@ const settings = Object.assign(
 );
 function safeJSON(s) { try { return JSON.parse(s); } catch { return null; } }
 function store(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch { /* ignore */ } }
+// online room we're in, so a reload can rejoin it
+const ONLINE_KEY = 'ludo3d.online';
+// stable per-device id: lets the host give a reconnecting player their seat back
+const PID = (() => {
+  let id = safeJSON(localStorage.getItem('ludo3d.pid'));
+  if (!id) { id = Math.random().toString(36).slice(2) + Date.now().toString(36); store('ludo3d.pid', id); }
+  return id;
+})();
+function clearOnline() { try { localStorage.removeItem(ONLINE_KEY); } catch { /* ignore */ } }
 function applySettings() {
   sfx.enabled = settings.sound;
   sfx.vibrate = settings.vibrate;
@@ -63,6 +72,7 @@ function toast(text, color = null, dur = 1.8) {
 }
 
 initViewControls(view, { toast, onClick: () => sfx.click() });
+initOrientationSetting({ toast, onClick: () => sfx.click() });
 
 // ---------------------------------------------------------------- session
 /** @type {null | {mode:'local'|'host'|'client', players:any[], level:string, game:LudoGame, mySeats:Set<number>, queue:any[], busy:boolean, net?:any, paused?:boolean, over?:boolean, timer?:any}} */
@@ -74,14 +84,15 @@ function rollFor(p) {
   return settings.lucky ? luckyRoll(session.game, p, session.luck) : fairDie();
 }
 
-function startSession({ mode, players, level = 'normal', state = null, net = null, mySeat = null }) {
+function startSession({ mode, players, level = 'normal', state = null, net = null, mySeat = null, seq = 0 }) {
   clearTimeout(session?.timer);
   const seats = players.map((p, i) => (p.type !== 'off' ? i : -1)).filter((i) => i >= 0);
   const game = state ? LudoGame.from(state) : new LudoGame(seats);
   let mySeats;
   if (mode === 'local') mySeats = new Set(seats.filter((p) => players[p].type === 'human'));
   else mySeats = new Set([mySeat]);
-  session = { mode, players, level, game, mySeats, queue: [], busy: false, net, over: false, luck: { dry: [0, 0, 0, 0] } };
+  // seq numbers every action the host sends, so clients can spot gaps/repeats after a reconnect
+  session = { mode, players, level, game, mySeats, queue: [], busy: false, net, over: false, luck: { dry: [0, 0, 0, 0] }, seq, rx: seq };
   view.controls.autoRotate = false;
   view.setPlayers(game.s.seats);
   view.layout(game, 0);
@@ -98,6 +109,7 @@ function startSession({ mode, players, level = 'normal', state = null, net = nul
   bgfx.ambient(() => (session ? COLOR_CSS[COLORS[session.game.current]] : '#ffffff'));
   requestWakeLock();
   save();
+  saveOnline();
   setTimeout(() => afterIdle(), 700);
 }
 
@@ -147,10 +159,11 @@ async function pump() {
       if (item.kind === 'intent') {
         action = validate(item);
         if (!action) continue;
-        if (s.mode === 'host') s.net.broadcast({ t: 'act', a: action, n: s.game.s.moves });
+        if (s.mode === 'host') { s.seq++; s.net.broadcast({ t: 'act', a: action, seq: s.seq }); }
       } else action = item.a;
       hideControls();
       await apply(action);
+      if (s.mode === 'host') saveOnline();
     }
   } catch (err) {
     console.error(err);
@@ -233,7 +246,7 @@ function afterIdle() {
   } else {
     hideControls();
     if (g.phase === 'roll') setChipDie(p, 'idle');
-    $('#hint').textContent = pl.type === 'ai' ? `${pname(p)} is thinking…` : `Waiting for ${pname(p)}…`;
+    $('#hint').textContent = pl.type === 'ai' ? `${pname(p)} is thinking…` : pl.away ? `${pname(p)} is reconnecting…` : `Waiting for ${pname(p)}…`;
   }
   if (isAuthority()) scheduleAuto();
 }
@@ -246,9 +259,12 @@ function scheduleAuto() {
   const p = g.current;
   const pl = s.players[p];
   const fast = settings.fast ? 0.45 : 1;
-  if (pl.type === 'ai') {
-    if (g.phase === 'roll') s.timer = setTimeout(() => submit({ t: 'roll' }, p), 650 * fast);
-    else if (g.phase === 'move') s.timer = setTimeout(() => submit({ t: 'move', k: chooseMove(g, p, g.s.dice, s.level) }, p), 520 * fast);
+  // a player whose connection dropped keeps their seat; if it's their turn
+  // the computer plays it for them after a generous wait
+  const cover = pl.type === 'remote' && pl.away ? 12000 : 0;
+  if (pl.type === 'ai' || cover) {
+    if (g.phase === 'roll') s.timer = setTimeout(() => submit({ t: 'roll' }, p), 650 * fast + cover);
+    else if (g.phase === 'move') s.timer = setTimeout(() => submit({ t: 'move', k: chooseMove(g, p, g.s.dice, s.level) }, p), 520 * fast + cover);
   } else if (g.phase === 'move' && settings.autoMove) {
     const legal = g.s.legal;
     const progs = new Set(legal.map((k) => g.s.tokens[p][k]));
@@ -297,7 +313,8 @@ function buildChips() {
     el.dataset.p = p;
     el.style.setProperty('--c', COLOR_CSS[COLORS[p]]);
     const icon = pl.type === 'ai' ? '🤖' : pl.type === 'remote' ? '🌐' : '🙂';
-    const you = session.mode !== 'local' && session.mySeats.has(p) ? 'YOU' : session.mode === 'local' && pl.type === 'human' && session.mySeats.size === 1 ? 'YOU' : '';
+    const you = session.mode !== 'local' && session.mySeats.has(p) ? 'YOU' : session.mode === 'local' && pl.type === 'human' && session.mySeats.size === 1 ? 'YOU' : pl.away ? 'OFFLINE' : '';
+    el.classList.toggle('away', !!pl.away);
     el.innerHTML = `<div class="avatar">${icon}</div><div class="info"><div class="name"></div><div class="pips">${'<i></i>'.repeat(4)}</div>${you ? `<div class="tag">${you}</div>` : ''}</div><button class="die" aria-label="Roll dice"><span class="face">${'<i></i>'.repeat(9)}</span></button>`;
     el.querySelector('.name').textContent = pname(p);
     paintDie(el.querySelector('.die'), session.game.s.dice || 5);
@@ -461,13 +478,10 @@ $('#btnAgain').addEventListener('click', () => {
   if (!session) return;
   const { mode, players, level, net, mySeats } = session;
   if (mode === 'host') {
-    const st = new LudoGame(players.map((p, i) => (p.type !== 'off' ? i : -1)).filter((i) => i >= 0)).toJSON();
-    net.broadcast({ t: 'start', players: publicPlayers(players), state: st });
-    session.net = null; // keep connection alive while replacing session
-    startSession({ mode, players, level, net, mySeat: [...mySeats][0], state: st });
+    hostNewGame(players, level, net, [...mySeats][0]);
   } else startSession({ mode, players, level });
 });
-$('#btnOverMenu').addEventListener('click', () => { sfx.click(); endSession(); show('#scrMenu'); refreshMenu(); });
+$('#btnOverMenu').addEventListener('click', () => { sfx.click(); leaveOnline(); endSession(); show('#scrMenu'); refreshMenu(); });
 
 // ---------------------------------------------------------------- pause
 function pause() {
@@ -491,15 +505,13 @@ $('#btnRestart').addEventListener('click', () => {
   if (!confirm('Restart this game?')) return;
   const { mode, players, level, net, mySeats } = session;
   if (mode === 'host') {
-    const st = new LudoGame(players.map((p, i) => (p.type !== 'off' ? i : -1)).filter((i) => i >= 0)).toJSON();
-    net.broadcast({ t: 'start', players: publicPlayers(players), state: st });
-    session.net = null;
-    startSession({ mode, players, level, net, mySeat: [...mySeats][0], state: st });
+    hostNewGame(players, level, net, [...mySeats][0]);
   } else if (mode === 'local') startSession({ mode, players, level });
 });
 $('#btnQuit').addEventListener('click', () => {
   sfx.click();
   if (session && session.mode !== 'local' && !confirm('Leave the online game?')) return;
+  leaveOnline();
   endSession();
   show('#scrMenu');
   refreshMenu();
@@ -606,8 +618,45 @@ $('#btnContinue').addEventListener('click', () => {
 });
 
 // ---------------------------------------------------------------- online
-const publicPlayers = (players) => players.map((p) => ({ type: p.type, name: p.name }));
+const publicPlayers = (players) => players.map((p) => ({ type: p.type, name: p.name, away: !!p.away }));
 let lobby = null; // { role:'host'|'client', net, players, mySeat }
+const awayTimers = new Map(); // lobby seat -> timer that frees it if the player never returns
+const kickedPids = new Set();
+
+// what a reload needs to put the room back together
+function saveOnline() {
+  const strip = (list) => list.map(({ peer, ...p }) => p);
+  if (session?.mode === 'host' && session.net?.code) {
+    store(ONLINE_KEY, { role: 'host', code: session.net.code, epoch: session.net.epoch, players: strip(session.players), state: session.game.toJSON(), seq: session.seq });
+  } else if (!session && lobby?.role === 'host') {
+    store(ONLINE_KEY, { role: 'host', code: lobby.net.code, epoch: lobby.net.epoch, players: strip(lobby.players) });
+  }
+}
+
+// deliberate exit (not a reload): tell the others, forget the room
+function leaveOnline() {
+  const net = session?.mode !== 'local' ? session?.net : lobby?.net;
+  const role = session ? session.mode : lobby?.role;
+  if (net) {
+    if (role === 'host') net.broadcast({ t: 'ended' });
+    else if (role === 'client') net.send({ t: 'bye' });
+  }
+  clearOnline();
+  setNetBanner(null);
+}
+
+function setNetBanner(text) {
+  const el = $('#netBanner');
+  el.textContent = text || '';
+  el.classList.toggle('hidden', !text);
+}
+
+function hostNewGame(players, level, net, mySeat) {
+  const st = new LudoGame(players.map((p, i) => (p.type !== 'off' ? i : -1)).filter((i) => i >= 0)).toJSON();
+  net.broadcast({ t: 'start', players: publicPlayers(players), state: st, seq: 0 });
+  if (session) session.net = null; // keep connection alive while replacing session
+  startSession({ mode: 'host', players, level, net, mySeat, state: st, seq: 0 });
+}
 
 function myOnlineName() {
   const n = $('#inpName').value.trim() || 'Player';
@@ -637,6 +686,7 @@ $('#btnCreate').addEventListener('click', async () => {
     };
     lobby.players.forEach((p) => { p.peer = null; });
     wireHost(net);
+    saveOnline();
     $('#lobbyCode').textContent = code;
     renderLobby();
     show('#scrLobby', true);
@@ -656,11 +706,36 @@ function wireHost(net) {
   net.on('message', (peer, msg) => {
     if (!msg || typeof msg !== 'object') return;
     if (msg.t === 'hello') {
-      if (session || !lobby) { net.send(peer, { t: 'full', why: 'Game already started.' }); setTimeout(() => net.kick(peer), 300); return; }
+      const pid = String(msg.pid || peer);
+      const list = session ? session.players : lobby?.players;
+      if (!list) return;
+      // same device coming back (reload / dropped link): give the seat back
+      const back = list.findIndex((p) => p.type === 'remote' && p.pid === pid);
+      if (back >= 0) {
+        const pl = list[back];
+        if (pl.peer && pl.peer !== peer) net.kick(pl.peer);
+        pl.peer = peer;
+        const wasAway = pl.away;
+        pl.away = false;
+        clearTimeout(awayTimers.get(back));
+        awayTimers.delete(back);
+        net.send(peer, { t: 'welcome', seat: back });
+        if (session) {
+          net.send(peer, { t: 'start', players: publicPlayers(session.players), state: session.game.toJSON(), seq: session.seq, resync: true });
+          net.broadcast({ t: 'players', players: publicPlayers(session.players) });
+          if (wasAway) toast(`${pl.name} is back`, COLOR_CSS[COLORS[back]], 1.6);
+          buildChips();
+          if (!session.busy) afterIdle();
+          saveOnline();
+        } else { renderLobby(); broadcastLobby(); }
+        return;
+      }
+      if (session) { net.send(peer, { t: 'full', why: 'Game already started.' }); setTimeout(() => net.kick(peer), 300); return; }
+      if (kickedPids.has(pid)) { net.send(peer, { t: 'kicked' }); setTimeout(() => net.kick(peer), 300); return; }
       const order = [2, 1, 3];
       const seat = order.find((i) => lobby.players[i].type === 'open');
       if (seat === undefined) { net.send(peer, { t: 'full', why: 'Room is full.' }); setTimeout(() => net.kick(peer), 300); return; }
-      lobby.players[seat] = { type: 'remote', name: String(msg.name || 'Guest').slice(0, 14), peer };
+      lobby.players[seat] = { type: 'remote', name: String(msg.name || 'Guest').slice(0, 14), peer, pid };
       net.send(peer, { t: 'welcome', seat });
       sfx.enterBoard();
       renderLobby();
@@ -678,31 +753,55 @@ function wireHost(net) {
       net.broadcast({ t: 'emoji', p: seat, e: msg.e });
       floatEmoji(seat, msg.e);
     } else if (msg.t === 'resync' && session) {
-      net.send(peer, { t: 'start', players: publicPlayers(session.players), state: session.game.toJSON(), resync: true });
+      net.send(peer, { t: 'start', players: publicPlayers(session.players), state: session.game.toJSON(), seq: session.seq, resync: true });
+    } else if (msg.t === 'bye') {
+      // the player chose to leave: free the seat for good
+      const seat = hostSeatOf(peer);
+      if (seat >= 0) playerGone(seat, true);
+      net.kick(peer);
     }
   });
+  // link dropped (slow network, reload, app in background): keep the seat
   net.on('leave', (peer) => {
-    if (session && session.mode === 'host') {
-      const seat = hostSeatOf(peer);
-      if (seat < 0) return;
-      const pl = session.players[seat];
-      toast(`${pl.name} left — computer takes over`, COLOR_CSS[COLORS[seat]], 2.5);
-      pl.type = 'ai';
-      pl.peer = null;
-      pl.name += ' 🤖';
-      net.broadcast({ t: 'players', players: publicPlayers(session.players) });
-      buildChips();
-      if (!session.busy) afterIdle();
-    } else if (lobby?.role === 'host') {
-      const seat = lobby.players.findIndex((p) => p.peer === peer);
-      if (seat >= 0) { lobby.players[seat] = { type: 'open', name: '', peer: null }; renderLobby(); broadcastLobby(); }
-    }
+    const seat = hostSeatOf(peer);
+    if (seat >= 0) playerGone(seat, false);
   });
   net.on('error', (m) => { $('#lobbyMsg').textContent = m; });
 }
 
+function playerGone(seat, forGood) {
+  if (session && session.mode === 'host') {
+    const pl = session.players[seat];
+    pl.peer = null;
+    if (forGood) {
+      toast(`${pl.name} left — computer takes over`, COLOR_CSS[COLORS[seat]], 2.5);
+      pl.type = 'ai';
+      pl.away = false;
+      pl.name += ' 🤖';
+    } else {
+      pl.away = true;
+      toast(`${pl.name} lost connection — waiting for them…`, COLOR_CSS[COLORS[seat]], 2.5);
+    }
+    session.net?.broadcast({ t: 'players', players: publicPlayers(session.players) });
+    buildChips();
+    if (!session.busy) afterIdle();
+    saveOnline();
+  } else if (lobby?.role === 'host') {
+    const free = () => { lobby.players[seat] = { type: 'open', name: '', peer: null }; renderLobby(); broadcastLobby(); };
+    if (forGood) { free(); return; }
+    lobby.players[seat].peer = null;
+    lobby.players[seat].away = true;
+    clearTimeout(awayTimers.get(seat));
+    // hold the seat for a minute in case they're just reloading
+    awayTimers.set(seat, setTimeout(() => { if (lobby?.players[seat]?.away) free(); }, 60000));
+    renderLobby();
+    broadcastLobby();
+  }
+}
+
 function broadcastLobby() {
   if (lobby?.role === 'host') lobby.net.broadcast({ t: 'lobby', players: publicPlayers(lobby.players) });
+  saveOnline();
 }
 
 function renderLobby() {
@@ -714,6 +813,7 @@ function renderLobby() {
     if (cfg.type === 'open') label = 'Waiting for player…';
     if (cfg.type === 'off') label = '—';
     if (cfg.type === 'ai') label = `Computer`;
+    if (cfg.away) label += ' (reconnecting…)';
     if (p === lobby.mySeat) label += ' (you)';
     const editable = host && p !== 0 && cfg.type !== 'remote';
     const row = seatRow(p, { ...cfg, label }, (type) => {
@@ -726,7 +826,13 @@ function renderLobby() {
       kick.className = 'btn btn-ghost small';
       kick.style.width = 'auto';
       kick.textContent = 'Kick';
-      kick.onclick = () => { lobby.net.kick(cfg.peer); lobby.players[p] = { type: 'open', name: '', peer: null }; renderLobby(); broadcastLobby(); };
+      kick.onclick = () => {
+        if (cfg.pid) kickedPids.add(cfg.pid);
+        if (cfg.peer) { lobby.net.send(cfg.peer, { t: 'kicked' }); const id = cfg.peer; setTimeout(() => lobby?.net.kick(id), 300); }
+        lobby.players[p] = { type: 'open', name: '', peer: null };
+        renderLobby();
+        broadcastLobby();
+      };
       row.appendChild(kick);
     }
     wrap.appendChild(row);
@@ -754,13 +860,14 @@ $('#btnLobbyStart').addEventListener('click', () => {
   const net = lobby.net;
   const seats = players.map((p, i) => (p.type !== 'off' ? i : -1)).filter((i) => i >= 0);
   const state = new LudoGame(seats).toJSON();
-  net.broadcast({ t: 'start', players: publicPlayers(players), state });
+  net.broadcast({ t: 'start', players: publicPlayers(players), state, seq: 0 });
   lobby = null;
-  startSession({ mode: 'host', players, level: 'normal', net, mySeat: 0, state });
+  startSession({ mode: 'host', players, level: 'normal', net, mySeat: 0, state, seq: 0 });
 });
 
 $('#btnLobbyLeave').addEventListener('click', () => {
   sfx.click();
+  leaveOnline();
   lobby?.net.close();
   lobby = null;
   show('#scrMenu');
@@ -776,10 +883,12 @@ async function joinRoom() {
   $('#onlineMsg').textContent = 'Connecting…';
   $('#btnJoin').disabled = true;
   const net = new ClientNet();
+  net.myName = name;
   try {
     await net.join(code);
     wireClient(net);
-    net.send({ t: 'hello', name });
+    net.send({ t: 'hello', pid: PID, name });
+    store(ONLINE_KEY, { role: 'client', code: net.code, epoch: net.epoch, name });
     $('#onlineMsg').textContent = 'Joined! Waiting for host…';
   } catch (e) {
     $('#onlineMsg').textContent = e.message;
@@ -791,51 +900,123 @@ async function joinRoom() {
 
 function wireClient(net) {
   let mySeat = -1;
+  const bail = (why) => {
+    net.close();
+    clearOnline();
+    setNetBanner(null);
+    const inGame = !!session || !!lobby;
+    lobby = null;
+    if (session) { session.net = null; endSession(); }
+    show('#scrMenu');
+    refreshMenu();
+    if (inGame) alert(why); else { show('#scrOnline', true); $('#onlineMsg').textContent = why; }
+  };
   net.on('message', (msg) => {
     if (!msg || typeof msg !== 'object') return;
     switch (msg.t) {
       case 'welcome':
         mySeat = msg.seat;
-        lobby = { role: 'client', net, mySeat, players: [0, 1, 2, 3].map(() => ({ type: 'open', name: '' })) };
-        $('#lobbyCode').textContent = net.code;
-        renderLobby();
-        show('#scrLobby', true);
+        setNetBanner(null);
+        if (!session) {
+          lobby = { role: 'client', net, mySeat, players: lobby?.players || [0, 1, 2, 3].map(() => ({ type: 'open', name: '' })) };
+          $('#lobbyCode').textContent = net.code;
+          renderLobby();
+          show('#scrLobby', true);
+        }
         break;
       case 'lobby':
         if (lobby) { lobby.players = msg.players; renderLobby(); }
         break;
       case 'full':
-        $('#onlineMsg').textContent = msg.why || 'Room is full.';
+        bail(msg.why || 'Room is full.');
+        break;
+      case 'kicked':
+        bail('You were removed from the room.');
+        break;
+      case 'ended':
+        bail('The host ended the game.');
         break;
       case 'start': {
         lobby = null;
         const players = msg.players.map((p) => ({ ...p }));
-        startSession({ mode: 'client', players, net, mySeat, state: msg.state });
-        if (msg.resync) toast('Re-synced with host');
+        startSession({ mode: 'client', players, net, mySeat, state: msg.state, seq: msg.seq || 0 });
+        if (msg.resync) toast('Back in sync with the host', null, 1.2);
         break;
       }
       case 'act':
-        if (session?.mode === 'client') { session.queue.push({ kind: 'act', a: msg.a }); pump(); }
+        if (session?.mode !== 'client') break;
+        if (typeof msg.seq === 'number') {
+          if (msg.seq <= session.rx) break; // already have it
+          if (msg.seq > session.rx + 1) { net.send({ t: 'resync' }); break; } // missed some
+          session.rx = msg.seq;
+        }
+        session.queue.push({ kind: 'act', a: msg.a });
+        pump();
         break;
       case 'emoji':
         if (session) floatEmoji(msg.p, msg.e);
         break;
       case 'players':
-        if (session) { msg.players.forEach((p, i) => Object.assign(session.players[i], p)); buildChips(); }
+        if (session) { msg.players.forEach((p, i) => Object.assign(session.players[i], p)); buildChips(); afterIdle(); }
         break;
       default:
     }
   });
-  net.on('close', () => {
-    if (session?.mode === 'client' || lobby?.role === 'client') {
-      const wasOver = session?.over;
-      lobby = null;
-      if (session) { session.net = null; endSession(); }
-      show('#scrMenu');
-      refreshMenu();
-      if (!wasOver) alert('Disconnected from the host.');
-    }
+  // link lost: stay in the game and keep retrying quietly
+  net.on('down', () => setNetBanner('Connection lost — reconnecting…'));
+  net.on('up', () => {
+    const sv = safeJSON(localStorage.getItem(ONLINE_KEY));
+    if (sv?.role === 'client') store(ONLINE_KEY, { ...sv, epoch: net.epoch });
+    setNetBanner('Reconnected — syncing…');
+    net.send({ t: 'hello', pid: PID, name: net.myName });
   });
+}
+
+// Put an online game back after a reload (host or player).
+async function resumeOnline(sv) {
+  $('#inpName').value = safeJSON(localStorage.getItem(NAME_KEY)) || '';
+  show('#scrOnline', true);
+  $('#onlineMsg').textContent = `Reconnecting to room ${sv.code}…`;
+  if (sv.role === 'client') {
+    const net = new ClientNet();
+    net.myName = sv.name;
+    try {
+      await net.join(sv.code, { patient: true, epoch: sv.epoch || 0 });
+      wireClient(net);
+      net.send({ t: 'hello', pid: PID, name: sv.name });
+      $('#onlineMsg').textContent = 'Rejoined! Syncing with host…';
+    } catch {
+      net.close();
+      clearOnline();
+      $('#onlineMsg').textContent = 'Could not rejoin the room. It may have ended.';
+    }
+    return;
+  }
+  const net = new HostNet();
+  try {
+    await net.start(sv.code, sv.epoch || 0);
+  } catch (e) {
+    net.close();
+    clearOnline();
+    $('#onlineMsg').textContent = e.message;
+    return;
+  }
+  wireHost(net);
+  // everyone else is "away" until their device reconnects
+  const players = sv.players.map((p) => ({ ...p, peer: null, away: p.type === 'remote' }));
+  if (sv.state && sv.state.phase !== 'over') {
+    startSession({ mode: 'host', players, level: 'normal', net, mySeat: 0, state: sv.state, seq: sv.seq || 0 });
+    toast('Room restored — players are reconnecting', null, 2.2);
+  } else {
+    lobby = { role: 'host', net, mySeat: 0, players: players.map((p) => (sv.state && p.type === 'off' ? { type: 'open', name: '', peer: null } : p)) };
+    lobby.players.forEach((p, seat) => {
+      if (p.away) awayTimers.set(seat, setTimeout(() => { if (lobby?.players[seat]?.away) { lobby.players[seat] = { type: 'open', name: '', peer: null }; renderLobby(); broadcastLobby(); } }, 60000));
+    });
+    $('#lobbyCode').textContent = sv.code;
+    renderLobby();
+    show('#scrLobby', true);
+    saveOnline();
+  }
 }
 
 // ---------------------------------------------------------------- menu & attract mode
@@ -902,7 +1083,9 @@ attract();
 refreshMenu();
 show('#scrMenu');
 const roomParam = new URLSearchParams(location.search).get('room');
-if (roomParam) {
+const savedOnline = safeJSON(localStorage.getItem(ONLINE_KEY));
+if (savedOnline?.code && !roomParam) resumeOnline(savedOnline);
+else if (roomParam) {
   $('#inpName').value = safeJSON(localStorage.getItem(NAME_KEY)) || '';
   $('#inpCode').value = roomParam.toUpperCase().slice(0, 5);
   show('#scrMenu');

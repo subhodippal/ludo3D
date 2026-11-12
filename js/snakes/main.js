@@ -7,7 +7,7 @@ import { wait, flushTweens } from '../anim.js';
 import { COLORS, COLOR_CSS, COLOR_NAME } from '../constants.js';
 import * as bgfx from '../bgfx.js';
 import { fairDie } from '../luck.js';
-import { initViewControls } from '../viewctl.js';
+import { initViewControls, initOrientationSetting } from '../viewctl.js';
 
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
@@ -63,6 +63,7 @@ function toast(text, color = null, dur = 1.8) {
 }
 
 initViewControls(view, { toast, onClick: () => sfx.click() });
+initOrientationSetting({ toast, onClick: () => sfx.click() });
 
 // ---------------------------------------------------------------- session
 /** @type {null | {players:any[], board:string, game:SnakesGame, mySeats:Set<number>, busy:boolean, paused?:boolean, over?:boolean, timer?:any}} */
@@ -84,7 +85,7 @@ function startSession({ players, board, layout = null, state = null }) {
   $('#boardTag').textContent = `${game.s.layout.name.toUpperCase()} BOARD`;
   $('#hud').classList.remove('hidden');
   show(null);
-  bgfx.ambient(() => (session ? pcss(session.game.current) : '#ffffff'));
+  bgfx.ambient(null); // no idle background fireworks: keeps the game light
   randomBackdrop();
   view.ripple(1, 0x7c4dff, 1.2);
   requestWakeLock();
@@ -156,8 +157,6 @@ async function playTurn(v) {
   } else {
     if (v === 6 && !res.won) {
       sfx.six();
-      view.fx.shockwave(view.dice.mesh.position, parseInt(css.slice(1), 16));
-      view.fx.burst(view.dice.mesh.position, 0xfff3a0, 30);
       celebrate('six', p);
     }
     await view.animateMove(g, res, { fast });
@@ -297,7 +296,8 @@ function celebrate(kind, p, sub, level = 1, colorOverride = null) {
   box.querySelector('.title').textContent = c.title;
   box.querySelector('.sub').textContent = sub ?? c.sub ?? '';
   fx.appendChild(box);
-  for (let i = 0; i < c.n; i++) {
+  const flat = view.mode === '2d'; // 2D view: banner text only, no effects
+  for (let i = 0; i < (flat ? 0 : c.n); i++) {
     const e = document.createElement('span');
     e.className = 'fly';
     e.textContent = c.emoji[i % c.emoji.length];
@@ -316,11 +316,10 @@ function celebrate(kind, p, sub, level = 1, colorOverride = null) {
     v.style.setProperty('--c', css);
     fx.appendChild(v);
     setTimeout(() => v.remove(), 1200);
-    bgfx.flash(css);
-    bgfx.launch(css, 3, 0.7, true);
+    if (!flat) bgfx.flash(css);
     view.shake(0.5);
   } else {
-    bgfx.party(pcss(p), level || 1);
+    if (!flat) bgfx.party(pcss(p), level || 1);
     if (kind === 'ladder') sfx.cheer();
   }
   setTimeout(() => box.remove(), 1900);
@@ -332,8 +331,10 @@ async function winner(p) {
   hideControls();
   celebrate('win', p, `${pname(p)} reached 100!`, 4);
   sfx.win();
-  view.fx.confetti(240, 12);
-  await view.winDance(p);
+  if (view.mode !== '2d') {
+    view.fx.confetti(160, 10);
+    await view.winDance(p);
+  }
   if (session !== s) return;
   gameOver();
 }
@@ -361,8 +362,10 @@ function gameOver() {
     $('#ranking').appendChild(li);
   });
   const wcss = pcss(w);
-  setTimeout(() => bgfx.confettiRain(wcss, 200), 1500);
-  setTimeout(() => { bgfx.launch(wcss, 14, 1.2); bgfx.fountain(wcss, 2); }, 2600);
+  if (view.mode !== '2d') {
+    setTimeout(() => bgfx.confettiRain(wcss, 120), 1500);
+    setTimeout(() => bgfx.launch(wcss, 6, 1.1), 2600);
+  }
   setTimeout(() => { if (session === s) show('#scrOver'); }, 900);
 }
 
@@ -587,7 +590,7 @@ function attract() {
   view.setView(false);
   view.controls.autoRotate = true;
   view.controls.autoRotateSpeed = 0.6;
-  bgfx.ambient(() => COLOR_CSS[COLORS[Math.floor(Math.random() * 4)]]);
+  bgfx.ambient(null);
   let i = 0;
   const cycle = () => {
     if (session) { clearInterval(attractTimer); return; }

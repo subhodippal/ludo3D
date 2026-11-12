@@ -410,3 +410,12 @@ input:focus { border-color: #8fb4ff; }
 #bg .beams.go::after { animation: beamSweep 1.6s ease-in-out infinite alternate-reverse; opacity: .7; }
 @keyframes beamSweep { from { transform: rotate(-28deg); } to { transform: rotate(28deg); } }
 @keyframes beamsFade { 0% { opacity: 0; } 12% { opacity: 1; } 75% { opacity: .85; } 100% { opacity: 0; } }
+
+/* online: connection status + players whose link dropped */
+.net-banner {
+  position: fixed; z-index: 60; left: 50%; top: calc(64px + var(--safe-t)); transform: translateX(-50%);
+  padding: 8px 14px; border-radius: 12px; font-size: 14px; font-weight: 800; white-space: nowrap;
+  background: rgba(240, 88, 42, .92); color: #fff; box-shadow: 0 6px 18px rgba(0,0,0,.35); pointer-events: none;
+}
+.chip.away { opacity: .55; }
+.chip.away .tag { color: #ffb38a; }

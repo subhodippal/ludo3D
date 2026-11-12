@@ -58,7 +58,10 @@ function faceTexture(value, renderer) {
 }
 
 export class Dice {
-  constructor(scene, renderer, { halfX = 7.45, halfZ = 7.45, floorY = 0, size = 0.9 } = {}) {
+  // simple: skip the physics replay and use a short scripted drop-and-bounce
+  // (much lighter on phones; used by Snakes & Ladders)
+  constructor(scene, renderer, { halfX = 7.45, halfZ = 7.45, floorY = 0, size = 0.9, simple = false } = {}) {
+    this.simple = simple;
     const SIZE = size;
     const HALF = size / 2;
     this.half = HALF;
@@ -201,6 +204,7 @@ export class Dice {
   // Throw the die so that it shows `value`. fromDir: vector from board centre
   // towards the thrower. Resolves when the die comes to rest.
   roll(value, fromDir = new THREE.Vector3(0, 0, 1)) {
+    if (this.simple) return this._dropRoll(value, fromDir);
     let sim;
     for (let tries = 0; tries < 8; tries++) {
       sim = this._simulate(fromDir);
@@ -215,6 +219,46 @@ export class Dice {
     });
   }
 
+  // Scripted throw: falls from the thrower's side, tumbles, bounces twice and
+  // settles showing `value`. No physics stepping, so no hitch before it starts.
+  _dropRoll(value, fromDir) {
+    const { halfX, halfZ } = this.bounds;
+    const dir = fromDir.clone().setY(0).normalize();
+    const to = new THREE.Vector3((Math.random() - 0.5) * halfX * 0.7, this.floorY + this.half, (Math.random() - 0.5) * halfZ * 0.7);
+    const from = to.clone().addScaledVector(dir, 2.2).setY(this.floorY + 3.2);
+    const qEnd = new THREE.Quaternion().setFromUnitVectors(FACE_NORMAL[value], new THREE.Vector3(0, 1, 0));
+    qEnd.premultiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.random() * Math.PI * 2));
+    const axis = new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).normalize();
+    this.value = value;
+    this.offset.identity();
+    sfx.diceShake();
+    return new Promise((resolve) => {
+      this.playing = { simple: true, start: null, dur: 0.85, from, to, qEnd, axis, turns: 2 + Math.random() * 1.5, resolve, hits: 0 };
+      if (document.hidden) this._finish();
+    });
+  }
+
+  _updateDrop(p, now) {
+    if (p.start === null) p.start = now;
+    const k = Math.min(1, (now - p.start) / 1000 / p.dur);
+    if (k >= 1) { this._finish(); return; }
+    // horizontal glide eases out; height = fall then two shrinking bounces
+    const e = 1 - Math.pow(1 - k, 3);
+    this.mesh.position.lerpVectors(p.from, p.to, e);
+    const h0 = p.from.y - p.to.y;
+    let y;
+    if (k < 0.45) { const f = k / 0.45; y = h0 * (1 - f * f); }
+    else if (k < 0.75) { const f = (k - 0.45) / 0.3; y = 0.45 * Math.sin(Math.PI * f); }
+    else if (k < 0.9) { const f = (k - 0.75) / 0.15; y = 0.12 * Math.sin(Math.PI * f); }
+    else y = 0;
+    this.mesh.position.y = p.to.y + y;
+    const hit = k >= 0.45 ? (k >= 0.75 ? (k >= 0.9 ? 3 : 2) : 1) : 0;
+    if (hit > p.hits) { p.hits = hit; sfx.diceHit([0, 0.8, 0.4, 0.15][hit]); if (hit === 1) sfx.buzz(12); }
+    // tumble that unwinds exactly onto the final face by ~80% of the throw
+    const spin = Math.max(0, 1 - k / 0.8);
+    this.mesh.quaternion.setFromAxisAngle(p.axis, spin * spin * p.turns * Math.PI * 2).premultiply(p.qEnd);
+  }
+
   _apply(f) {
     this.mesh.position.set(f[0], f[1], f[2]);
     this.mesh.quaternion.set(f[3], f[4], f[5], f[6]).multiply(this.offset);
@@ -222,6 +266,13 @@ export class Dice {
 
   _finish() {
     const p = this.playing;
+    if (p.simple) {
+      this.mesh.position.copy(p.to);
+      this.mesh.quaternion.copy(p.qEnd);
+      this.playing = null;
+      p.resolve(this.value);
+      return;
+    }
     this._apply(p.frames[p.frames.length - 1]);
     // snap to perfectly flat
     this.mesh.position.y = this.floorY + this.half;
@@ -243,6 +294,7 @@ export class Dice {
 
     const p = this.playing;
     if (!p) return;
+    if (p.simple) { this._updateDrop(p, now); return; }
     if (p.start === null) p.start = now;
     const fi = (now - p.start) / 1000 / STEP;
     const i = Math.floor(fi);

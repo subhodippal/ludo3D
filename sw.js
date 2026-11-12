@@ -1,6 +1,6 @@
 // Service worker: cache-first app shell so the game works offline.
 // Bump VERSION whenever you deploy changes.
-const VERSION = 'ludo3d-v20';
+const VERSION = 'ludo3d-v22';
 const ASSETS = [
   './',
   './index.html',

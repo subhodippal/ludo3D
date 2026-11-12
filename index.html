@@ -154,6 +154,12 @@
       <h2>Settings</h2>
       <label class="toggle"><span>Sound effects</span><input type="checkbox" data-set="sound"><i></i></label>
       <label class="toggle"><span>Vibration</span><input type="checkbox" data-set="vibrate"><i></i></label>
+      <label class="field">
+        <span>Screen orientation<br><small>locking needs fullscreen; on iPhone just turn the phone</small></span>
+        <div class="seg" id="segOrient">
+          <button data-v="auto">Auto</button><button data-v="portrait">Portrait</button><button data-v="landscape">Landscape</button>
+        </div>
+      </label>
       <label class="toggle"><span>Auto-move when only one choice</span><input type="checkbox" data-set="autoMove"><i></i></label>
       <label class="toggle"><span>Lucky dice<br><small>more sixes &amp; captures, for everyone</small></span><input type="checkbox" data-set="lucky"><i></i></label>
       <label class="toggle"><span>Fast computer turns</span><input type="checkbox" data-set="fast"><i></i></label>
@@ -180,6 +186,7 @@
     </div>
   </section>
 
+  <div id="netBanner" class="net-banner hidden" role="status" aria-live="polite"></div>
   <div id="loading" class="loading">Loading…</div>
 
   <script type="module" src="./js/main.js"></script>

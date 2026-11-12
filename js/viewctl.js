@@ -11,6 +11,14 @@ function save(mode) {
   try { localStorage.setItem(KEY, mode); } catch { /* storage unavailable */ }
 }
 
+const ORIENT_KEY = 'boardgames.orientation';
+
+async function lockTo(target) {
+  const el = document.documentElement;
+  if (!document.fullscreenElement && el.requestFullscreen) await el.requestFullscreen({ navigationUI: 'hide' });
+  await screen.orientation.lock(target);
+}
+
 // Browsers only allow locking orientation in fullscreen (Android Chrome and
 // most Android browsers). Elsewhere, e.g. iPhone Safari, tell the player to
 // turn the phone instead.
@@ -18,9 +26,7 @@ async function flipOrientation(toast) {
   const landscape = window.innerWidth > window.innerHeight;
   const target = landscape ? 'portrait' : 'landscape';
   try {
-    const el = document.documentElement;
-    if (!document.fullscreenElement && el.requestFullscreen) await el.requestFullscreen({ navigationUI: 'hide' });
-    await screen.orientation.lock(target);
+    await lockTo(target);
   } catch {
     toast?.(landscape ? 'Turn your phone upright for portrait' : 'Turn your phone sideways for landscape', null, 2.2);
   }
@@ -64,4 +70,36 @@ export function initViewControls(scene, { toast, onClick } = {}) {
     seg.after(rot);
     rot.addEventListener('click', () => { onClick?.(); flipOrientation(toast); });
   }
+}
+
+// Settings: Auto / Portrait / Landscape. The choice is remembered; because
+// browsers only lock orientation in response to a tap, a saved lock is
+// re-applied on the first tap after the page loads.
+export function initOrientationSetting({ toast, onClick } = {}) {
+  const seg = document.getElementById('segOrient');
+  if (!seg) return;
+  let pref = 'auto';
+  try { pref = localStorage.getItem(ORIENT_KEY) || 'auto'; } catch { /* storage unavailable */ }
+  const mark = () => seg.querySelectorAll('button').forEach((b) => b.classList.toggle('on', b.dataset.v === pref));
+  const apply = async (announce) => {
+    try {
+      if (pref === 'auto') {
+        screen.orientation?.unlock?.();
+        if (document.fullscreenElement) await document.exitFullscreen();
+      } else await lockTo(pref);
+    } catch {
+      if (announce) toast?.(pref === 'landscape' ? 'Turn your phone sideways for landscape' : 'Turn your phone upright for portrait', null, 2.2);
+    }
+  };
+  mark();
+  seg.addEventListener('click', (e) => {
+    const b = e.target.closest('button');
+    if (!b) return;
+    pref = b.dataset.v;
+    try { localStorage.setItem(ORIENT_KEY, pref); } catch { /* storage unavailable */ }
+    mark();
+    onClick?.();
+    apply(true);
+  });
+  if (pref !== 'auto') document.addEventListener('click', () => apply(false), { once: true, capture: true });
 }
