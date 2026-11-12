@@ -61,15 +61,19 @@
       <button id="btnContinue" class="btn btn-ghost hidden">Continue game</button>
       <button id="btnVsCpu" class="btn btn-primary">
         <svg viewBox="0 0 24 24"><rect x="5" y="8" width="14" height="11" rx="3"/><path d="M12 4v4M9 13h.01M15 13h.01"/></svg>
-        Play vs Computer
+        <span class="btn-txt">Single Player<small>offline · vs computer</small></span>
       </button>
       <button id="btnLocal" class="btn btn-green">
         <svg viewBox="0 0 24 24"><circle cx="8" cy="8" r="3"/><circle cx="16" cy="8" r="3"/><path d="M2 20c0-3.3 2.7-6 6-6s6 2.7 6 6M12 20c0-3.3 1.8-6 4-6s6 2.7 6 6"/></svg>
-        Pass &amp; Play
+        <span class="btn-txt">Group Play<small>offline · friends on this device</small></span>
       </button>
       <button id="btnOnline" class="btn btn-blue">
+        <svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M9 12h6M12 9v6"/></svg>
+        <span class="btn-txt">Play with Friends<small>online · create or join a room</small></span>
+      </button>
+      <button id="btnMatch" class="btn btn-purple">
         <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3.5 3 14.5 0 18M12 3c-3 3.5-3 14.5 0 18"/></svg>
-        Play Online
+        <span class="btn-txt">Find Online Match<small>online · play with people worldwide</small></span>
       </button>
       <div class="row">
         <button id="btnHelp" class="btn btn-ghost small">How to play</button>
@@ -99,7 +103,7 @@
   <!-- Online -->
   <section id="scrOnline" class="screen hidden">
     <div class="card">
-      <h2>Play online</h2>
+      <h2>Play with friends</h2>
       <label class="field"><span>Your name</span><input id="inpName" maxlength="14" autocomplete="nickname" placeholder="Player"></label>
       <button id="btnCreate" class="btn btn-primary">Create room</button>
       <div class="divider"><span>or join a friend</span></div>
@@ -112,10 +116,22 @@
     </div>
   </section>
 
+  <!-- Find online match -->
+  <section id="scrMatch" class="screen hidden">
+    <div class="card">
+      <h2>Find online match</h2>
+      <label class="field"><span>Your name</span><input id="inpMatchName" maxlength="14" autocomplete="nickname" placeholder="Player"></label>
+      <p class="muted">You'll be matched with other people searching right now. The game starts as soon as someone joins.</p>
+      <button id="btnMatchGo" class="btn btn-purple">Find match</button>
+      <p id="matchMsg" class="muted match-msg" aria-live="polite"></p>
+      <button id="btnMatchCancel" class="btn btn-ghost small">Back</button>
+    </div>
+  </section>
+
   <!-- Lobby -->
   <section id="scrLobby" class="screen hidden">
     <div class="card">
-      <h2>Room</h2>
+      <h2 id="lobbyTitle">Room</h2>
       <div class="code-box"><span id="lobbyCode">-----</span>
         <button id="btnShare" class="btn btn-ghost small">Share link</button>
       </div>

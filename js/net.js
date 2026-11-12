@@ -7,13 +7,24 @@
 //  - a client whose link drops keeps retrying in the background ("down" /
 //    "up" events) until it reconnects or the player leaves
 //  - a host that reloads reclaims the same room code, and clients find it again
+//  - every room has a secret id checked on each (re)connect, so a returning
+//    player can never land in a different room that reused the same slot
+//
+// Both games use this module; setGame() keeps their rooms apart.
 
-const PREFIX = 'ludo3d-v1-';
+let PREFIX = 'ludo3d-v1-';
+export function setGame(prefix) { PREFIX = prefix; }
 const ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
 const MAX_EPOCH_PROBE = 6; // how many room-id variants a client tries
 const PING_MS = 4000;      // keep-alive interval
 const DEAD_MS = 30000;     // silence before a link is treated as lost
 const CONNECT_MS = 12000;  // one connection attempt
+const PROBE_MS = 6000;     // waiting for a room's info reply
+
+// public matchmaking: a fixed set of well-known match rooms per game
+export const MATCH_SLOTS = 10;
+export const matchCode = (slot) => `MATCH-${slot}`;
+export const isMatchCode = (code) => typeof code === 'string' && code.startsWith('MATCH-');
 
 let loading = null;
 function loadPeer() {
@@ -45,11 +56,41 @@ window.addEventListener('pageshow', (e) => { if (e.persisted && live.size) locat
 // room under the next "epoch" id (CODE, CODE-1, CODE-2, ...); clients probe
 // those in order. The room code people see never changes.
 const idFor = (code, epoch) => PREFIX + code + (epoch ? '-' + epoch : '');
+const newRoomId = () => makeCode() + makeCode();
 
 export function makeCode() {
   const a = new Uint32Array(5);
   crypto.getRandomValues(a);
   return [...a].map((n) => ALPHABET[n % ALPHABET.length]).join('');
+}
+
+// Ask a set of rooms what they are (players, open seats, started?) without
+// joining them. Resolves to the rooms that answered: [{ code, ...info }].
+export async function scanRooms(codes) {
+  await loadPeer();
+  const peer = new window.Peer({ debug: 0 });
+  try {
+    await new Promise((res, rej) => {
+      const t = setTimeout(() => rej(new Error('Timed out reaching the matchmaking server.')), CONNECT_MS);
+      peer.on('open', () => { clearTimeout(t); res(); });
+      peer.on('error', (e) => { if (e.type !== 'peer-unavailable') { clearTimeout(t); rej(new Error(friendlyError(e))); } });
+    });
+    const probe = (code) => new Promise((res) => {
+      const conn = peer.connect(idFor(code, 0), { reliable: true });
+      const t = setTimeout(() => { try { conn.close(); } catch { /* never opened */ } res(null); }, PROBE_MS);
+      conn.on('open', () => conn.send({ t: 'info' }));
+      conn.on('data', (m) => {
+        if (m?.t !== 'info') return;
+        clearTimeout(t);
+        conn.close();
+        res({ ...m.info, code });
+      });
+      conn.on('error', () => {});
+    });
+    return (await Promise.all(codes.map(probe))).filter(Boolean);
+  } finally {
+    peer.destroy();
+  }
 }
 
 function friendlyError(err) {
@@ -62,7 +103,11 @@ function friendlyError(err) {
 }
 
 export class HostNet {
-  constructor() { this.conns = new Map(); this.seen = new Map(); this.handlers = {}; live.add(this); }
+  constructor() {
+    this.conns = new Map(); this.seen = new Map(); this.handlers = {};
+    this.describe = () => ({}); // what an 'info' probe is told about this room
+    live.add(this);
+  }
   on(ev, fn) { this.handlers[ev] = fn; return this; }
   _emit(ev, ...a) { this.handlers[ev]?.(...a); }
 
@@ -83,9 +128,10 @@ export class HostNet {
 
   // New room, or (with `code`) re-open a room after a reload under the next
   // epoch id, so it's back within seconds.
-  async start(code = null, epoch = 0) {
+  async start(code = null, epoch = 0, roomId = null) {
     await loadPeer();
     const reclaim = !!code;
+    this.roomId = roomId || newRoomId();
     for (let attempt = 0; attempt < (reclaim ? MAX_EPOCH_PROBE : 3); attempt++) {
       const c = code || makeCode();
       const e = reclaim ? epoch + 1 + attempt : 0;
@@ -103,6 +149,23 @@ export class HostNet {
     throw new Error(reclaim ? 'Could not reopen the room. Create a new one.' : 'Could not create room');
   }
 
+  // Open exactly this room code (a matchmaking slot). Rejects with
+  // type 'unavailable-id' when someone already holds it.
+  async startAt(code) {
+    await loadPeer();
+    this.roomId = newRoomId();
+    try {
+      await this._open(idFor(code, 0));
+    } catch (err) {
+      this.peer?.destroy();
+      throw Object.assign(new Error(friendlyError(err)), { type: err.type });
+    }
+    this.code = code;
+    this.epoch = 0;
+    this._beat();
+    return code;
+  }
+
   _accept(conn) {
     conn.on('open', () => {
       this.conns.set(conn.peer, conn);
@@ -110,6 +173,19 @@ export class HostNet {
       conn.on('data', (msg) => {
         this.seen.set(conn.peer, Date.now());
         if (msg?.t === 'ping') return;
+        if (msg?.t === 'hi') {
+          // (re)connect handshake: a client that knew another room is turned away
+          conn.send({ t: 'hi', ok: !msg.room || msg.room === this.roomId, room: this.roomId });
+          return;
+        }
+        if (msg?.t === 'info') {
+          // a lobby scan, not a player: answer and hang up quietly
+          conn.send({ t: 'info', info: this.describe() });
+          this.conns.delete(conn.peer);
+          this.seen.delete(conn.peer);
+          setTimeout(() => conn.close(), 200);
+          return;
+        }
         this._emit('message', conn.peer, msg);
       });
       conn.on('close', () => this._drop(conn.peer, conn));
@@ -150,7 +226,7 @@ export class HostNet {
 }
 
 export class ClientNet {
-  constructor() { this.handlers = {}; this.closed = false; this.up = false; this.epoch = 0; live.add(this); }
+  constructor() { this.handlers = {}; this.closed = false; this.up = false; this.epoch = 0; this.roomId = null; live.add(this); }
   on(ev, fn) { this.handlers[ev] = fn; return this; }
   _emit(ev, ...a) { this.handlers[ev]?.(...a); }
 
@@ -201,13 +277,22 @@ export class ClientNet {
       };
       const t = setTimeout(() => fail(new Error('Timed out connecting to room.')), CONNECT_MS);
       this._pending = (e) => { if (e.type === 'peer-unavailable' || e.type === 'network' || e.type === 'socket-error' || e.type === 'server-error') fail(e); };
-      conn.on('open', () => {
-        if (done) { conn.close(); return; }
+      // once open, confirm it's the same room before using it
+      const onHi = (m) => {
+        if (m?.t !== 'hi' || done) return;
+        conn.off?.('data', onHi);
+        if (!m.ok) { fail({ type: 'peer-unavailable' }); return; }
         done = true;
         this._pending = null;
         clearTimeout(t);
+        this.roomId = this.roomId || m.room;
         this._attach(conn);
         res();
+      };
+      conn.on('open', () => {
+        if (done) { conn.close(); return; }
+        conn.on('data', onHi);
+        conn.send({ t: 'hi', room: this.roomId });
       });
       conn.on('error', () => {});
     });
@@ -220,7 +305,7 @@ export class ClientNet {
     conn.on('data', (msg) => {
       if (conn !== this.conn) return;
       this.seen = Date.now();
-      if (msg?.t === 'ping') return;
+      if (msg?.t === 'ping' || msg?.t === 'hi') return;
       this._emit('message', msg);
     });
     conn.on('close', () => { if (conn === this.conn) this._lost(); });
@@ -234,10 +319,11 @@ export class ClientNet {
 
   // Join a room. With `patient`, keep retrying for a while (used when
   // rejoining after a reload, while the host may be reloading too).
-  async join(code, { patient = false, epoch = 0 } = {}) {
+  async join(code, { patient = false, epoch = 0, roomId = null } = {}) {
     await loadPeer();
     this.code = code.trim().toUpperCase();
     this.epoch = epoch;
+    this.roomId = roomId;
     const deadline = Date.now() + (patient ? 60000 : 0);
     for (;;) {
       try { await this._connectAny(); return; } catch (e) {

@@ -3,7 +3,7 @@ import { LudoGame } from './game.js';
 import { chooseMove } from './ai.js';
 import { sfx } from './audio.js';
 import { wait, flushTweens } from './anim.js';
-import { HostNet, ClientNet } from './net.js';
+import { HostNet, ClientNet, scanRooms, matchCode, isMatchCode, MATCH_SLOTS } from './net.js';
 import { COLORS, COLOR_CSS, COLOR_HEX, COLOR_NAME, SEATS_FOR, STAR_INDICES, trackIndexFor } from './constants.js';
 import * as bgfx from './bgfx.js';
 import { luckyRoll, fairDie } from './luck.js';
@@ -103,7 +103,7 @@ function startSession({ mode, players, level = 'normal', state = null, net = nul
   $('#roomTag').classList.toggle('hidden', mode === 'local');
   $('#btnEmoji').classList.toggle('hidden', mode === 'local');
   $('#emojiPanel').classList.add('hidden');
-  if (net?.code) $('#roomTag').textContent = 'ROOM ' + net.code;
+  if (net?.code) $('#roomTag').textContent = isMatchCode(net.code) ? 'ONLINE MATCH' : 'ROOM ' + net.code;
   $('#btnRestart').classList.toggle('hidden', mode === 'client');
   show(null);
   bgfx.ambient(() => (session ? COLOR_CSS[COLORS[session.game.current]] : '#ffffff'));
@@ -587,12 +587,12 @@ $$('#segLevel button').forEach((b) => b.addEventListener('click', () => { sfx.cl
 function openSetup(kind) {
   const myName = localStorage.getItem(NAME_KEY) ? safeJSON(localStorage.getItem(NAME_KEY)) : '';
   if (kind === 'cpu') {
-    $('#setupTitle').textContent = 'Play vs Computer';
+    $('#setupTitle').textContent = 'Single Player';
     setupState = { level: 'normal', players: COLORS.map((c, p) => (p === 0
       ? { type: 'human', name: myName || 'You' }
       : { type: 'ai', name: `CPU ${COLOR_NAME[c]}` })) };
   } else {
-    $('#setupTitle').textContent = 'Pass & Play';
+    $('#setupTitle').textContent = 'Group Play';
     const on = SEATS_FOR[2];
     setupState = { level: 'normal', players: COLORS.map((c, p) => ({ type: on.includes(p) ? 'human' : 'off', name: COLOR_NAME[c] })) };
   }
@@ -627,9 +627,9 @@ const kickedPids = new Set();
 function saveOnline() {
   const strip = (list) => list.map(({ peer, ...p }) => p);
   if (session?.mode === 'host' && session.net?.code) {
-    store(ONLINE_KEY, { role: 'host', code: session.net.code, epoch: session.net.epoch, players: strip(session.players), state: session.game.toJSON(), seq: session.seq });
+    store(ONLINE_KEY, { role: 'host', code: session.net.code, epoch: session.net.epoch, roomId: session.net.roomId, players: strip(session.players), state: session.game.toJSON(), seq: session.seq });
   } else if (!session && lobby?.role === 'host') {
-    store(ONLINE_KEY, { role: 'host', code: lobby.net.code, epoch: lobby.net.epoch, players: strip(lobby.players) });
+    store(ONLINE_KEY, { role: 'host', code: lobby.net.code, epoch: lobby.net.epoch, roomId: lobby.net.roomId, match: !!lobby.match, players: strip(lobby.players) });
   }
 }
 
@@ -703,6 +703,17 @@ function hostSeatOf(peerId) {
 }
 
 function wireHost(net) {
+  // what someone searching for a match is told about this room
+  net.describe = () => {
+    const list = session ? session.players : lobby?.players || [];
+    return {
+      name: list[0]?.name || 'Host',
+      players: list.filter((p) => p.type === 'human' || p.type === 'remote').length,
+      open: session ? 0 : list.filter((p) => p.type === 'open').length,
+      started: !!session,
+      match: isMatchCode(net.code),
+    };
+  };
   net.on('message', (peer, msg) => {
     if (!msg || typeof msg !== 'object') return;
     if (msg.t === 'hello') {
@@ -740,6 +751,7 @@ function wireHost(net) {
       sfx.enterBoard();
       renderLobby();
       broadcastLobby();
+      if (lobby.match) matchCountdown();
     } else if (msg.t === 'intent' && session) {
       const seat = hostSeatOf(peer);
       if (seat < 0 || !msg.a) return;
@@ -787,8 +799,8 @@ function playerGone(seat, forGood) {
     if (!session.busy) afterIdle();
     saveOnline();
   } else if (lobby?.role === 'host') {
-    const free = () => { lobby.players[seat] = { type: 'open', name: '', peer: null }; renderLobby(); broadcastLobby(); };
-    if (forGood) { free(); return; }
+    const free = () => { lobby.players[seat] = { type: 'open', name: '', peer: null }; renderLobby(); broadcastLobby(); if (lobby.match) matchCountdown(); };
+    if (forGood || lobby.match) { free(); return; }
     lobby.players[seat].peer = null;
     lobby.players[seat].away = true;
     clearTimeout(awayTimers.get(seat));
@@ -798,6 +810,144 @@ function playerGone(seat, forGood) {
     broadcastLobby();
   }
 }
+
+// ---------------------------------------------------------------- find online match
+// No server: matchmaking uses a fixed set of public match rooms. Searching
+// lists them; if one is waiting with a free seat you join it, otherwise you
+// open the first free slot and wait. A host left alone keeps checking and
+// merges into a busier/lower slot, so two searchers never wait apart.
+let matchSearch = null; // { cancelled }
+const remoteCount = () => (lobby ? lobby.players.filter((p) => p.type === 'remote').length : 0);
+const slotOf = (code) => Number(code.split('-')[1]);
+const matchCodes = () => [...Array(MATCH_SLOTS).keys()].map(matchCode);
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+function stopMatchTimers() {
+  if (!lobby) return;
+  clearInterval(lobby.countdownTimer);
+  clearInterval(lobby.mergeTimer);
+  lobby.countdownTimer = lobby.mergeTimer = null;
+  lobby.countdownLeft = null;
+}
+
+// first opponent joined: start soon (immediately with a full table)
+function matchCountdown() {
+  if (!lobby?.match || lobby.role !== 'host') return;
+  const n = remoteCount();
+  if (n >= 3) { startLobbyGame(); return; }
+  if (!n) { clearInterval(lobby.countdownTimer); lobby.countdownTimer = null; lobby.countdownLeft = null; renderLobby(); return; }
+  if (lobby.countdownTimer) return;
+  lobby.countdownLeft = 15;
+  lobby.countdownTimer = setInterval(() => {
+    if (!lobby) return;
+    lobby.countdownLeft--;
+    if (lobby.countdownLeft <= 0) { startLobbyGame(); return; }
+    renderLobby();
+  }, 1000);
+  renderLobby();
+}
+
+async function findMatch() {
+  const name = (($('#inpMatchName').value || '').trim() || 'Player').slice(0, 14);
+  store(NAME_KEY, name);
+  if (matchSearch) matchSearch.cancelled = true;
+  const me = { cancelled: false };
+  matchSearch = me;
+  const msg = (t) => { if (!me.cancelled) $('#matchMsg').textContent = t; };
+  $('#btnMatchGo').disabled = true;
+  msg('Looking for players…');
+  try {
+    for (let round = 0; !me.cancelled; round++) {
+      const rooms = await scanRooms(matchCodes());
+      if (me.cancelled) return;
+      const waiting = rooms.filter((r) => r.match && !r.started && r.open > 0)
+        .sort((a, b) => b.players - a.players || slotOf(a.code) - slotOf(b.code));
+      for (const r of waiting) {
+        msg(`Joining ${r.name}'s match…`);
+        if (await joinMatch(r.code, name, me)) return;
+        if (me.cancelled) return;
+      }
+      // nobody waiting: open a match room and let the others find us
+      const taken = new Set(rooms.map((r) => r.code));
+      for (const code of matchCodes()) {
+        if (taken.has(code)) continue;
+        try { await hostMatch(code, name); return; } catch (e) {
+          if (e.type !== 'unavailable-id') throw e;
+        }
+      }
+      msg('All match rooms are busy, retrying…');
+      await sleep(3000);
+    }
+  } catch (e) {
+    msg(e.message || 'Could not reach the matchmaking server.');
+    sfx.error();
+  } finally {
+    if (matchSearch === me) matchSearch = null;
+    $('#btnMatchGo').disabled = false;
+  }
+}
+
+async function joinMatch(code, name, search) {
+  const net = new ClientNet();
+  net.myName = name;
+  net.matching = true;
+  try { await net.join(code); } catch { net.close(); return false; }
+  if (search?.cancelled) { net.close(); return true; }
+  wireClient(net);
+  net.send({ t: 'hello', pid: PID, name });
+  store(ONLINE_KEY, { role: 'client', code: net.code, epoch: net.epoch, roomId: net.roomId, name });
+  return true;
+}
+
+async function hostMatch(code, name) {
+  const net = new HostNet();
+  await net.startAt(code);
+  lobby = {
+    role: 'host', net, mySeat: 0, match: true,
+    players: [{ type: 'human', name, peer: null }, ...[1, 2, 3].map(() => ({ type: 'open', name: '', peer: null }))],
+  };
+  wireHost(net);
+  $('#lobbyCode').textContent = code;
+  renderLobby();
+  show('#scrLobby', true);
+  saveOnline();
+  // alone in our room? keep an eye out for a better one to merge into
+  lobby.mergeTimer = setInterval(async () => {
+    const L = lobby;
+    if (!L || L.net !== net || L.busyMerge || remoteCount() > 0) return;
+    L.busyMerge = true;
+    try {
+      const rooms = (await scanRooms(matchCodes())).filter((r) => r.code !== code && r.match && !r.started && r.open > 0);
+      const better = rooms.find((r) => r.players > 1 || slotOf(r.code) < slotOf(code));
+      if (better && lobby === L && remoteCount() === 0) {
+        stopMatchTimers();
+        net.close();
+        lobby = null;
+        clearOnline();
+        $('#matchMsg').textContent = `Joining ${better.name}'s match…`;
+        show('#scrMatch');
+        if (!(await joinMatch(better.code, name))) findMatch();
+      }
+    } catch { /* try again next tick */ }
+    if (L) L.busyMerge = false;
+  }, 7000);
+}
+
+$('#btnMatch').addEventListener('click', () => {
+  sfx.click();
+  $('#inpMatchName').value = safeJSON(localStorage.getItem(NAME_KEY)) || '';
+  $('#matchMsg').textContent = '';
+  show('#scrMatch', true);
+});
+$('#btnMatchGo').addEventListener('click', () => { sfx.click(); findMatch(); });
+$('#btnMatchCancel').addEventListener('click', () => {
+  sfx.click();
+  if (matchSearch) matchSearch.cancelled = true;
+  matchSearch = null;
+  $('#matchMsg').textContent = '';
+  $('#btnMatchGo').disabled = false;
+  back();
+});
 
 function broadcastLobby() {
   if (lobby?.role === 'host') lobby.net.broadcast({ t: 'lobby', players: publicPlayers(lobby.players) });
@@ -815,13 +965,13 @@ function renderLobby() {
     if (cfg.type === 'ai') label = `Computer`;
     if (cfg.away) label += ' (reconnecting…)';
     if (p === lobby.mySeat) label += ' (you)';
-    const editable = host && p !== 0 && cfg.type !== 'remote';
+    const editable = host && !lobby.match && p !== 0 && cfg.type !== 'remote';
     const row = seatRow(p, { ...cfg, label }, (type) => {
       lobby.players[p] = { type, name: type === 'ai' ? `CPU ${COLOR_NAME[COLORS[p]]}` : '', peer: null };
       renderLobby();
       broadcastLobby();
     }, { editableName: false, options: editable ? ['open', 'ai', 'off'] : [] });
-    if (host && cfg.type === 'remote') {
+    if (host && !lobby.match && cfg.type === 'remote') {
       const kick = document.createElement('button');
       kick.className = 'btn btn-ghost small';
       kick.style.width = 'auto';
@@ -838,7 +988,17 @@ function renderLobby() {
     wrap.appendChild(row);
   });
   $('#btnLobbyStart').classList.toggle('hidden', !host);
-  $('#lobbyNote').textContent = host ? 'Share the code. Friends join from “Play Online”. Open seats left empty are removed.' : 'Waiting for the host to start…';
+  $('#lobbyTitle').textContent = lobby.match ? 'Online match' : 'Room';
+  $('.code-box').classList.toggle('hidden', !!lobby.match);
+  if (lobby.match) {
+    const n = remoteCount();
+    $('#btnLobbyStart').textContent = n ? 'Start now' : 'Play with computers';
+    $('#lobbyNote').textContent = !host ? 'Match found! The game starts in a moment…'
+      : n ? `Match found! Starting in ${lobby.countdownLeft ?? 15}s… (more players can still join)` : 'Waiting for other players to join… (or start now against computers)';
+  } else {
+    $('#btnLobbyStart').textContent = 'Start game';
+    $('#lobbyNote').textContent = host ? 'Share the code. Friends join from “Play with Friends”. Open seats left empty are removed.' : 'Waiting for the host to start…';
+  }
 }
 
 $('#btnShare').addEventListener('click', async () => {
@@ -852,9 +1012,13 @@ $('#btnShare').addEventListener('click', async () => {
 });
 function toastLobby(m) { $('#lobbyMsg').textContent = m; setTimeout(() => { $('#lobbyMsg').textContent = ''; }, 2000); }
 
-$('#btnLobbyStart').addEventListener('click', () => {
-  sfx.click();
-  const players = lobby.players.map((p) => ({ ...p, type: p.type === 'open' ? 'off' : p.type }));
+$('#btnLobbyStart').addEventListener('click', () => { sfx.click(); startLobbyGame(); });
+function startLobbyGame() {
+  if (!lobby || lobby.role !== 'host') return;
+  stopMatchTimers();
+  // a match nobody else joined: fill the table with computers
+  const fill = lobby.match && remoteCount() === 0 ? 'ai' : 'off';
+  const players = lobby.players.map((p, i) => ({ ...p, type: p.type === 'open' ? fill : p.type, name: p.type === 'open' && fill === 'ai' ? `CPU ${COLOR_NAME[COLORS[i]]}` : p.name }));
   players.forEach((p, i) => { if (p.type === 'off') p.name = ''; else if (!p.name) p.name = COLOR_NAME[COLORS[i]]; });
   if (players.filter((p) => p.type !== 'off').length < 2) { $('#lobbyMsg').textContent = 'Need at least 2 players (add a Computer or wait for friends).'; sfx.error(); return; }
   const net = lobby.net;
@@ -863,10 +1027,12 @@ $('#btnLobbyStart').addEventListener('click', () => {
   net.broadcast({ t: 'start', players: publicPlayers(players), state, seq: 0 });
   lobby = null;
   startSession({ mode: 'host', players, level: 'normal', net, mySeat: 0, state, seq: 0 });
-});
+}
 
 $('#btnLobbyLeave').addEventListener('click', () => {
   sfx.click();
+  stopMatchTimers();
+  if (matchSearch) matchSearch.cancelled = true;
   leaveOnline();
   lobby?.net.close();
   lobby = null;
@@ -888,7 +1054,7 @@ async function joinRoom() {
     await net.join(code);
     wireClient(net);
     net.send({ t: 'hello', pid: PID, name });
-    store(ONLINE_KEY, { role: 'client', code: net.code, epoch: net.epoch, name });
+    store(ONLINE_KEY, { role: 'client', code: net.code, epoch: net.epoch, roomId: net.roomId, name });
     $('#onlineMsg').textContent = 'Joined! Waiting for host…';
   } catch (e) {
     $('#onlineMsg').textContent = e.message;
@@ -901,6 +1067,15 @@ async function joinRoom() {
 function wireClient(net) {
   let mySeat = -1;
   const bail = (why) => {
+    if (net.matching && !session) {
+      // that match filled up or started: quietly look for another
+      net.close();
+      clearOnline();
+      lobby = null;
+      show('#scrMatch');
+      findMatch();
+      return;
+    }
     net.close();
     clearOnline();
     setNetBanner(null);
@@ -918,7 +1093,7 @@ function wireClient(net) {
         mySeat = msg.seat;
         setNetBanner(null);
         if (!session) {
-          lobby = { role: 'client', net, mySeat, players: lobby?.players || [0, 1, 2, 3].map(() => ({ type: 'open', name: '' })) };
+          lobby = { role: 'client', net, mySeat, match: isMatchCode(net.code), players: lobby?.players || [0, 1, 2, 3].map(() => ({ type: 'open', name: '' })) };
           $('#lobbyCode').textContent = net.code;
           renderLobby();
           show('#scrLobby', true);
@@ -966,7 +1141,7 @@ function wireClient(net) {
   net.on('down', () => setNetBanner('Connection lost — reconnecting…'));
   net.on('up', () => {
     const sv = safeJSON(localStorage.getItem(ONLINE_KEY));
-    if (sv?.role === 'client') store(ONLINE_KEY, { ...sv, epoch: net.epoch });
+    if (sv?.role === 'client') store(ONLINE_KEY, { ...sv, epoch: net.epoch, roomId: net.roomId });
     setNetBanner('Reconnected — syncing…');
     net.send({ t: 'hello', pid: PID, name: net.myName });
   });
@@ -981,7 +1156,7 @@ async function resumeOnline(sv) {
     const net = new ClientNet();
     net.myName = sv.name;
     try {
-      await net.join(sv.code, { patient: true, epoch: sv.epoch || 0 });
+      await net.join(sv.code, { patient: true, epoch: sv.epoch || 0, roomId: sv.roomId || null });
       wireClient(net);
       net.send({ t: 'hello', pid: PID, name: sv.name });
       $('#onlineMsg').textContent = 'Rejoined! Syncing with host…';
@@ -994,7 +1169,7 @@ async function resumeOnline(sv) {
   }
   const net = new HostNet();
   try {
-    await net.start(sv.code, sv.epoch || 0);
+    await net.start(sv.code, sv.epoch || 0, sv.roomId || null);
   } catch (e) {
     net.close();
     clearOnline();
@@ -1008,7 +1183,7 @@ async function resumeOnline(sv) {
     startSession({ mode: 'host', players, level: 'normal', net, mySeat: 0, state: sv.state, seq: sv.seq || 0 });
     toast('Room restored — players are reconnecting', null, 2.2);
   } else {
-    lobby = { role: 'host', net, mySeat: 0, players: players.map((p) => (sv.state && p.type === 'off' ? { type: 'open', name: '', peer: null } : p)) };
+    lobby = { role: 'host', net, mySeat: 0, match: !!sv.match, players: players.map((p) => (sv.state && p.type === 'off' ? { type: 'open', name: '', peer: null } : p)) };
     lobby.players.forEach((p, seat) => {
       if (p.away) awayTimers.set(seat, setTimeout(() => { if (lobby?.players[seat]?.away) { lobby.players[seat] = { type: 'open', name: '', peer: null }; renderLobby(); broadcastLobby(); } }, 60000));
     });

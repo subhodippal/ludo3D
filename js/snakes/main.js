@@ -1,4 +1,5 @@
-// Snakes & Ladders game controller: menus, turns, HUD, celebrations, saving.
+// Snakes & Ladders game controller: menus, turns, HUD, celebrations, saving,
+// and online play (rooms with friends, matchmaking, reconnects).
 
 import { SnakesScene, SNAKE_CSS } from './scene.js';
 import { SnakesGame, LAYOUTS, layoutFor, randomLayout, cellGrid, LAST } from './rules.js';
@@ -8,6 +9,9 @@ import { COLORS, COLOR_CSS, COLOR_NAME } from '../constants.js';
 import * as bgfx from '../bgfx.js';
 import { fairDie } from '../luck.js';
 import { initViewControls, initOrientationSetting } from '../viewctl.js';
+import { HostNet, ClientNet, scanRooms, matchCode, isMatchCode, MATCH_SLOTS, setGame } from '../net.js';
+
+setGame('snakes3d-v1-'); // separate rooms from Ludo
 
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
@@ -20,6 +24,13 @@ function safeJSON(s) { try { return JSON.parse(s); } catch { return null; } }
 function load(k) { try { return safeJSON(localStorage.getItem(k)); } catch { return null; } }
 function store(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch { /* ignore */ } }
 function drop(k) { try { localStorage.removeItem(k); } catch { /* ignore */ } }
+const ONLINE_KEY = 'snakes3d.online'; // the room we're in, so a reload can rejoin it
+// stable per-device id (shared with Ludo) so a reconnecting player gets their seat back
+const PID = (() => {
+  let id = load('ludo3d.pid');
+  if (!id) { id = Math.random().toString(36).slice(2) + Date.now().toString(36); store('ludo3d.pid', id); }
+  return id;
+})();
 const settings = Object.assign(
   { sound: true, vibrate: true, needSix: false, bounce: false, fast: false, hq: !/Android|iPhone|iPad|Mobile/i.test(navigator.userAgent) || (window.devicePixelRatio || 1) <= 2 },
   load(SETTINGS_KEY) || {},
@@ -66,23 +77,31 @@ initViewControls(view, { toast, onClick: () => sfx.click() });
 initOrientationSetting({ toast, onClick: () => sfx.click() });
 
 // ---------------------------------------------------------------- session
-/** @type {null | {players:any[], board:string, game:SnakesGame, mySeats:Set<number>, busy:boolean, paused?:boolean, over?:boolean, timer?:any}} */
+/** @type {null | {mode:'local'|'host'|'client', players:any[], board:string, game:SnakesGame, mySeats:Set<number>, busy:boolean, net?:any, seq:number, rx:number, queue:number[], paused?:boolean, over?:boolean, timer?:any}} */
 let session = null;
 const pname = (p) => session.players[p]?.name || COLOR_NAME[COLORS[p]];
 const pcss = (p) => COLOR_CSS[COLORS[p]];
 
-function startSession({ players, board, layout = null, state = null }) {
-  clearTimeout(session?.timer);
+function newGameState(players, board, layout = null) {
   const seats = players.map((p, i) => (p.type !== 'off' ? i : -1)).filter((i) => i >= 0);
-  const game = state ? SnakesGame.from(state) : new SnakesGame(seats, layout || layoutFor(board), { bounce: settings.bounce, needSix: settings.needSix });
-  session = { players, board, game, mySeats: new Set(seats.filter((p) => players[p].type === 'human')), busy: false, over: false };
+  return new SnakesGame(seats, layout || layoutFor(board), { bounce: settings.bounce, needSix: settings.needSix }).toJSON();
+}
+
+function startSession({ mode = 'local', players, board, layout = null, state = null, net = null, mySeat = null, seq = 0 }) {
+  clearTimeout(session?.timer);
+  const game = SnakesGame.from(state || newGameState(players, board, layout));
+  const mySeats = mode === 'local' ? new Set(game.s.seats.filter((p) => players[p].type === 'human')) : new Set([mySeat]);
+  // seq numbers every roll the host sends, so clients can spot gaps/repeats after a reconnect
+  session = { mode, players, board, game, mySeats, busy: false, over: false, net, seq, rx: seq, queue: [] };
   view.controls.autoRotate = false;
   view.setLayout(game.s.layout);
   view.setPlayers(game.s.seats);
   view.layout(game, 0);
   view.setView(true);
   buildChips();
-  $('#boardTag').textContent = `${game.s.layout.name.toUpperCase()} BOARD`;
+  const room = !net?.code ? '' : isMatchCode(net.code) ? ' · ONLINE' : ` · ${net.code}`;
+  $('#boardTag').textContent = `${game.s.layout.name.toUpperCase()} BOARD${room}`;
+  $('#btnRestart').classList.toggle('hidden', mode === 'client');
   $('#hud').classList.remove('hidden');
   show(null);
   bgfx.ambient(null); // no idle background fireworks: keeps the game light
@@ -90,11 +109,12 @@ function startSession({ players, board, layout = null, state = null }) {
   view.ripple(1, 0x7c4dff, 1.2);
   requestWakeLock();
   save();
+  saveOnline();
   setTimeout(() => afterIdle(), 900);
 }
 
 function save() {
-  if (!session) return;
+  if (!session || session.mode !== 'local') return;
   if (session.game.phase === 'over') { drop(SAVE_KEY); return; }
   store(SAVE_KEY, { players: session.players, board: session.board, state: session.game.toJSON() });
 }
@@ -102,6 +122,7 @@ function save() {
 function endSession() {
   if (!session) return;
   clearTimeout(session.timer);
+  session.net?.close();
   session = null;
   view.setTurn(-1);
   view.dice.setInvite(false);
@@ -111,16 +132,42 @@ function endSession() {
 }
 
 // ---------------------------------------------------------------- turns
+// Local games and the online host roll here; the host shares each value.
 async function doRoll(forced) {
   const s = session;
-  if (!s || s.busy || s.over || s.game.phase !== 'roll') return;
+  if (!s || s.mode === 'client' || s.busy || s.over || s.game.phase !== 'roll') return;
   s.busy = true;
+  s.pendingRoll = null;
   clearTimeout(s.timer);
   hideControls();
+  const v = forced >= 1 && forced <= 6 ? forced : fairDie();
+  if (s.mode === 'host') { s.seq++; s.net.broadcast({ t: 'act', v, seq: s.seq }); }
   try {
-    await playTurn(forced >= 1 && forced <= 6 ? forced : fairDie());
+    await playTurn(v);
   } catch (err) {
     console.error(err);
+  }
+  if (session !== s) return;
+  s.busy = false;
+  if (s.mode === 'host') saveOnline();
+  // a remote player tapped while we were still animating
+  if (s.pendingRoll === s.game.current && s.game.phase === 'roll') { doRoll(); return; }
+  afterIdle();
+}
+
+// Online player: replay the host's rolls in order.
+async function pumpClient() {
+  const s = session;
+  if (!s || s.busy) return;
+  s.busy = true;
+  try {
+    while (s.queue.length && session === s) {
+      hideControls();
+      await playTurn(s.queue.shift());
+    }
+  } catch (err) {
+    console.error(err);
+    s.net?.send({ t: 'resync' });
   }
   if (session !== s) return;
   s.busy = false;
@@ -132,7 +179,7 @@ async function playTurn(v) {
   const g = s.game;
   const p = g.current;
   const css = pcss(p);
-  const fast = settings.fast && s.players[p].type === 'ai';
+  const fast = settings.fast && s.players[p].type === 'ai' && s.mode === 'local';
   const res = g.roll(v);
   setChipDie(p, 'rolling');
   await view.rollDice(v, p);
@@ -194,15 +241,20 @@ function afterIdle() {
   view.setTurn(p);
   setTurnGlow(pcss(p));
   updateChips();
-  if (pl.type === 'human' && !s.paused) {
+  const mine = s.mySeats.has(p) && pl.type !== 'ai';
+  clearTimeout(s.timer);
+  if (mine && !s.paused) {
     setChipDie(p, 'ready');
     view.dice.setInvite(true, parseInt(pcss(p).slice(1), 16));
     $('#hint').textContent = s.mySeats.size > 1 ? `${pname(p)}: tap to roll 🎲` : 'Tap your dice 🎲';
   } else {
     hideControls();
     setChipDie(p, 'idle');
-    $('#hint').textContent = `${pname(p)} is rolling…`;
-    if (!s.paused) s.timer = setTimeout(() => doRoll(), settings.fast ? 300 : 750);
+    $('#hint').textContent = pl.type === 'ai' ? `${pname(p)} is rolling…` : pl.away ? `${pname(p)} is reconnecting…` : `Waiting for ${pname(p)}…`;
+    if (s.paused || s.mode === 'client') return;
+    // computers roll; a player whose connection dropped is covered after a long wait
+    if (pl.type === 'ai') s.timer = setTimeout(() => doRoll(), settings.fast && s.mode === 'local' ? 300 : 750);
+    else if (pl.type === 'remote' && pl.away) s.timer = setTimeout(() => doRoll(), 12000);
   }
 }
 
@@ -210,8 +262,9 @@ function humanRoll() {
   const s = session;
   if (!s || s.busy || s.paused || s.over) return;
   const p = s.game.current;
-  if (s.players[p].type !== 'human' || s.game.phase !== 'roll') return;
+  if (!s.mySeats.has(p) || s.players[p].type === 'ai' || s.game.phase !== 'roll') return;
   sfx.click();
+  if (s.mode === 'client') { s.net.send({ t: 'intent' }); hideControls(); return; }
   doRoll();
 }
 $('#chips').addEventListener('click', (e) => { if (e.target.closest('.die.ready')) humanRoll(); });
@@ -234,7 +287,8 @@ function buildChips() {
     el.className = 'chip ' + CORNERS[i];
     el.dataset.p = p;
     el.style.setProperty('--c', pcss(p));
-    const icon = pl.type === 'ai' ? '🤖' : '🙂';
+    const icon = pl.type === 'ai' ? '🤖' : session.mode !== 'local' && !session.mySeats.has(p) ? '🌐' : '🙂';
+    el.classList.toggle('away', !!pl.away);
     el.innerHTML = `<div class="avatar">${icon}</div><div class="info"><div class="name"></div><div class="sq"></div><div class="bar"><i></i></div></div><button class="die" aria-label="Roll dice"><span class="face">${'<i></i>'.repeat(9)}</span></button>`;
     el.querySelector('.name').textContent = pname(p);
     paintDie(el.querySelector('.die'), session.game.s.dice || 5);
@@ -366,29 +420,40 @@ function gameOver() {
     setTimeout(() => bgfx.confettiRain(wcss, 120), 1500);
     setTimeout(() => bgfx.launch(wcss, 6, 1.1), 2600);
   }
+  $('#btnAgain').textContent = s.mode === 'client' ? 'Waiting for host…' : 'Play again';
+  $('#btnAgain').disabled = s.mode === 'client';
+  $('#btnNewBoard').classList.toggle('hidden', s.mode === 'client');
   setTimeout(() => { if (session === s) show('#scrOver'); }, 900);
 }
 
+// local: restart straight away; online host: start everyone on the new game
+function newGame(board, layout) {
+  const s = session;
+  if (!s || s.mode === 'client') return;
+  if (s.mode === 'local') { startSession({ players: s.players, board, layout }); return; }
+  const state = newGameState(s.players, board, layout);
+  s.net.broadcast({ t: 'start', players: publicPlayers(s.players), board, state, seq: 0 });
+  const net = s.net;
+  s.net = null; // keep the connection while replacing the session
+  startSession({ mode: 'host', players: s.players, board, net, mySeat: [...s.mySeats][0], state, seq: 0 });
+}
 $('#btnAgain').addEventListener('click', () => {
   sfx.click();
-  if (!session) return;
-  const { players, board, game } = session;
   // same board again (a random board keeps its layout); "New random board" shuffles
-  startSession({ players, board, layout: game.s.layout });
+  if (session) newGame(session.board, session.game.s.layout);
 });
 $('#btnNewBoard').addEventListener('click', () => {
   sfx.click();
-  if (!session) return;
-  startSession({ players: session.players, board: 'random', layout: randomLayout() });
+  if (session) newGame('random', randomLayout());
 });
-$('#btnOverMenu').addEventListener('click', () => { sfx.click(); endSession(); show('#scrMenu'); refreshMenu(); });
+$('#btnOverMenu').addEventListener('click', () => { sfx.click(); leaveOnline(); endSession(); show('#scrMenu'); refreshMenu(); });
 
 // ---------------------------------------------------------------- pause
 function pause() {
   if (!session) return;
   sfx.click();
-  session.paused = true;
-  clearTimeout(session.timer);
+  if (session.mode === 'local') { session.paused = true; clearTimeout(session.timer); }
+  $('#scrPause h2').textContent = session.mode === 'local' ? 'Paused' : 'Menu';
   show('#scrPause', false);
 }
 function resume() {
@@ -402,9 +467,16 @@ $('#btnResume').addEventListener('click', () => { sfx.click(); resume(); });
 $('#btnRestart').addEventListener('click', () => {
   sfx.click();
   if (!session || !confirm('Restart this game?')) return;
-  startSession({ players: session.players, board: session.board, layout: session.game.s.layout });
+  newGame(session.board, session.game.s.layout);
 });
-$('#btnQuit').addEventListener('click', () => { sfx.click(); endSession(); show('#scrMenu'); refreshMenu(); });
+$('#btnQuit').addEventListener('click', () => {
+  sfx.click();
+  if (session && session.mode !== 'local' && !confirm('Leave the online game?')) return;
+  leaveOnline();
+  endSession();
+  show('#scrMenu');
+  refreshMenu();
+});
 $('#btnPauseSettings').addEventListener('click', () => openSettings());
 $('#btnSound').addEventListener('click', () => { settings.sound = !settings.sound; applySettings(); sfx.click(); });
 
@@ -490,10 +562,10 @@ function openSetup(kind) {
   const myName = load(NAME_KEY) || '';
   const prevBoard = load(SETTINGS_KEY)?.lastBoard || 'medium';
   if (kind === 'cpu') {
-    $('#setupTitle').textContent = 'Play vs Computer';
+    $('#setupTitle').textContent = 'Single Player';
     setup = { players: COLORS.map((c, p) => (p === 0 ? { type: 'human', name: myName || 'You' } : p < 2 ? { type: 'ai', name: `CPU ${COLOR_NAME[c]}` } : { type: 'off', name: COLOR_NAME[c] })) };
   } else {
-    $('#setupTitle').textContent = 'Pass & Play';
+    $('#setupTitle').textContent = 'Group Play';
     setup = { players: COLORS.map((c, p) => ({ type: p < 2 ? 'human' : 'off', name: COLOR_NAME[c] })) };
   }
   setup.board = prevBoard;
@@ -573,6 +645,563 @@ function drawPreview(cv, L) {
   });
 }
 
+// ---------------------------------------------------------------- online
+// Same model as Ludo: the host runs the game and shares every roll; players
+// are matched to seats by a per-device id so reloads and dropped links keep
+// their seat; rooms come back after the host reloads.
+const publicPlayers = (players) => players.map((p) => ({ type: p.type, name: p.name, away: !!p.away }));
+let lobby = null; // { role:'host'|'client', net, players, mySeat, match, board }
+const awayTimers = new Map();
+const kickedPids = new Set();
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const openSeat = () => ({ type: 'open', name: '', peer: null });
+
+function saveOnline() {
+  const strip = (list) => list.map(({ peer, ...p }) => p);
+  if (session?.mode === 'host' && session.net?.code) {
+    const n = session.net;
+    store(ONLINE_KEY, { role: 'host', code: n.code, epoch: n.epoch, roomId: n.roomId, board: session.board, players: strip(session.players), state: session.game.toJSON(), seq: session.seq });
+  } else if (!session && lobby?.role === 'host') {
+    const n = lobby.net;
+    store(ONLINE_KEY, { role: 'host', code: n.code, epoch: n.epoch, roomId: n.roomId, board: lobby.board, match: !!lobby.match, players: strip(lobby.players) });
+  }
+}
+
+// deliberate exit (not a reload): tell the others, forget the room
+function leaveOnline() {
+  const net = session?.mode !== 'local' ? session?.net : lobby?.net;
+  const role = session ? session.mode : lobby?.role;
+  if (net) {
+    if (role === 'host') net.broadcast({ t: 'ended' });
+    else if (role === 'client') net.send({ t: 'bye' });
+  }
+  drop(ONLINE_KEY);
+  setNetBanner(null);
+}
+
+function setNetBanner(text) {
+  $('#netBanner').textContent = text || '';
+  $('#netBanner').classList.toggle('hidden', !text);
+}
+
+function myName(sel) {
+  const n = ($(sel).value || '').trim().slice(0, 14) || 'Player';
+  store(NAME_KEY, n);
+  return n;
+}
+
+// ----- play with friends: create / join a room by code
+$('#btnOnline').addEventListener('click', () => {
+  sfx.click();
+  $('#inpName').value = load(NAME_KEY) || '';
+  $('#onlineMsg').textContent = '';
+  show('#scrOnline', true);
+});
+
+$('#btnCreate').addEventListener('click', async () => {
+  sfx.click();
+  const name = myName('#inpName');
+  $('#onlineMsg').textContent = 'Creating room…';
+  $('#btnCreate').disabled = true;
+  const net = new HostNet();
+  try {
+    const code = await net.start();
+    $('#onlineMsg').textContent = '';
+    openHostLobby(net, name, false);
+    $('#lobbyCode').textContent = code;
+  } catch (e) {
+    $('#onlineMsg').textContent = e.message;
+    sfx.error();
+  }
+  $('#btnCreate').disabled = false;
+});
+
+function openHostLobby(net, name, match) {
+  lobby = {
+    role: 'host', net, mySeat: 0, match, board: match ? 'medium' : (settings.lastBoard || 'medium'),
+    players: [{ type: 'human', name, peer: null }, openSeat(), openSeat(), openSeat()],
+  };
+  wireHost(net);
+  renderLobby();
+  show('#scrLobby', true);
+  saveOnline();
+}
+
+$('#btnJoin').addEventListener('click', joinRoom);
+$('#inpCode').addEventListener('keydown', (e) => { if (e.key === 'Enter') joinRoom(); });
+async function joinRoom() {
+  sfx.click();
+  const code = $('#inpCode').value.trim().toUpperCase();
+  if (code.length !== 5) { $('#onlineMsg').textContent = 'Enter the 5-letter room code.'; sfx.error(); return; }
+  const name = myName('#inpName');
+  $('#onlineMsg').textContent = 'Connecting…';
+  $('#btnJoin').disabled = true;
+  if (await connectAsPlayer(code, name)) $('#onlineMsg').textContent = 'Joined! Waiting for host…';
+  else { $('#onlineMsg').textContent = 'Could not join. Check the code.'; sfx.error(); }
+  $('#btnJoin').disabled = false;
+}
+
+async function connectAsPlayer(code, name, { matching = false, patient = false, epoch = 0, roomId = null } = {}) {
+  const net = new ClientNet();
+  net.myName = name;
+  net.matching = matching;
+  try { await net.join(code, { patient, epoch, roomId }); } catch { net.close(); return false; }
+  wireClient(net);
+  net.send({ t: 'hello', pid: PID, name });
+  store(ONLINE_KEY, { role: 'client', code: net.code, epoch: net.epoch, roomId: net.roomId, name });
+  return true;
+}
+
+// ----- host side
+function hostSeatOf(peerId) {
+  const list = session ? session.players : lobby?.players;
+  return list ? list.findIndex((p) => p.peer === peerId) : -1;
+}
+
+function wireHost(net) {
+  net.describe = () => {
+    const list = session ? session.players : lobby?.players || [];
+    return {
+      name: list[0]?.name || 'Host',
+      players: list.filter((p) => p.type === 'human' || p.type === 'remote').length,
+      open: session ? 0 : list.filter((p) => p.type === 'open').length,
+      started: !!session,
+      match: isMatchCode(net.code),
+    };
+  };
+  const startMsg = () => ({ t: 'start', players: publicPlayers(session.players), board: session.board, state: session.game.toJSON(), seq: session.seq, resync: true });
+  net.on('message', (peer, msg) => {
+    if (!msg || typeof msg !== 'object') return;
+    if (msg.t === 'hello') {
+      const pid = String(msg.pid || peer);
+      const list = session ? session.players : lobby?.players;
+      if (!list) return;
+      // same device coming back (reload / dropped link): give the seat back
+      const back = list.findIndex((p) => p.type === 'remote' && p.pid === pid);
+      if (back >= 0) {
+        const pl = list[back];
+        if (pl.peer && pl.peer !== peer) net.kick(pl.peer);
+        const wasAway = pl.away;
+        pl.peer = peer;
+        pl.away = false;
+        clearTimeout(awayTimers.get(back));
+        awayTimers.delete(back);
+        net.send(peer, { t: 'welcome', seat: back });
+        if (session) {
+          net.send(peer, startMsg());
+          net.broadcast({ t: 'players', players: publicPlayers(session.players) });
+          if (wasAway) toast(`${pl.name} is back`, pcss(back), 1.6);
+          buildChips();
+          if (!session.busy) afterIdle();
+          saveOnline();
+        } else { renderLobby(); broadcastLobby(); }
+        return;
+      }
+      if (session) { net.send(peer, { t: 'full', why: 'Game already started.' }); setTimeout(() => net.kick(peer), 300); return; }
+      if (kickedPids.has(pid)) { net.send(peer, { t: 'kicked' }); setTimeout(() => net.kick(peer), 300); return; }
+      const seat = [1, 2, 3].find((i) => lobby.players[i].type === 'open');
+      if (seat === undefined) { net.send(peer, { t: 'full', why: 'Room is full.' }); setTimeout(() => net.kick(peer), 300); return; }
+      lobby.players[seat] = { type: 'remote', name: String(msg.name || 'Guest').slice(0, 14), peer, pid };
+      net.send(peer, { t: 'welcome', seat });
+      sfx.enterBoard();
+      renderLobby();
+      broadcastLobby();
+      if (lobby.match) matchCountdown();
+    } else if (msg.t === 'intent' && session) {
+      const seat = hostSeatOf(peer);
+      const g = session.game;
+      if (seat < 0 || seat !== g.current || g.phase !== 'roll') return;
+      if (session.busy) session.pendingRoll = seat; else doRoll();
+    } else if (msg.t === 'resync' && session) {
+      net.send(peer, startMsg());
+    } else if (msg.t === 'bye') {
+      const seat = hostSeatOf(peer);
+      if (seat >= 0) playerGone(seat, true);
+      net.kick(peer);
+    }
+  });
+  // link dropped (slow network, reload, app in background): keep the seat
+  net.on('leave', (peer) => {
+    const seat = hostSeatOf(peer);
+    if (seat >= 0) playerGone(seat, false);
+  });
+  net.on('error', (m) => { $('#lobbyMsg').textContent = m; });
+}
+
+function playerGone(seat, forGood) {
+  if (session && session.mode === 'host') {
+    const pl = session.players[seat];
+    pl.peer = null;
+    if (forGood) {
+      toast(`${pl.name} left — computer takes over`, pcss(seat), 2.5);
+      pl.type = 'ai';
+      pl.away = false;
+      pl.name += ' 🤖';
+    } else {
+      pl.away = true;
+      toast(`${pl.name} lost connection — waiting for them…`, pcss(seat), 2.5);
+    }
+    session.net?.broadcast({ t: 'players', players: publicPlayers(session.players) });
+    buildChips();
+    if (!session.busy) afterIdle();
+    saveOnline();
+  } else if (lobby?.role === 'host') {
+    const free = () => { lobby.players[seat] = openSeat(); renderLobby(); broadcastLobby(); if (lobby.match) matchCountdown(); };
+    if (forGood || lobby.match) { free(); return; }
+    lobby.players[seat].peer = null;
+    lobby.players[seat].away = true;
+    clearTimeout(awayTimers.get(seat));
+    // hold the seat for a minute in case they're just reloading
+    awayTimers.set(seat, setTimeout(() => { if (lobby?.players[seat]?.away) free(); }, 60000));
+    renderLobby();
+    broadcastLobby();
+  }
+}
+
+function broadcastLobby() {
+  if (lobby?.role !== 'host') return;
+  lobby.net.broadcast({ t: 'lobby', players: publicPlayers(lobby.players), board: lobby.board });
+  saveOnline();
+}
+
+const remoteCount = () => (lobby ? lobby.players.filter((p) => p.type === 'remote').length : 0);
+
+function renderLobby() {
+  const wrap = $('#lobbySeats');
+  wrap.innerHTML = '';
+  const host = lobby.role === 'host';
+  lobby.players.forEach((cfg, p) => {
+    const row = document.createElement('div');
+    row.className = 'seat' + (cfg.type === 'off' ? ' off' : '');
+    row.style.setProperty('--c', pcss(p));
+    let label = cfg.name;
+    if (cfg.type === 'open') label = 'Waiting for player…';
+    if (cfg.type === 'off') label = '—';
+    if (cfg.type === 'ai') label = 'Computer';
+    if (cfg.away) label += ' (reconnecting…)';
+    if (p === lobby.mySeat) label += ' (you)';
+    row.innerHTML = '<span class="dot"></span><span class="who"></span>';
+    row.querySelector('.who').textContent = label;
+    if (host && !lobby.match && p !== 0 && cfg.type !== 'remote') {
+      const seg = document.createElement('div');
+      seg.className = 'seg';
+      for (const [o, txt] of [['open', 'Open'], ['ai', 'CPU'], ['off', 'Off']]) {
+        const b = document.createElement('button');
+        b.textContent = txt;
+        b.classList.toggle('on', cfg.type === o);
+        b.addEventListener('click', () => {
+          sfx.click();
+          lobby.players[p] = { type: o, name: o === 'ai' ? `CPU ${COLOR_NAME[COLORS[p]]}` : '', peer: null };
+          renderLobby();
+          broadcastLobby();
+        });
+        seg.appendChild(b);
+      }
+      row.appendChild(seg);
+    }
+    if (host && !lobby.match && cfg.type === 'remote') {
+      const kick = document.createElement('button');
+      kick.className = 'btn btn-ghost small';
+      kick.style.width = 'auto';
+      kick.textContent = 'Kick';
+      kick.onclick = () => {
+        if (cfg.pid) kickedPids.add(cfg.pid);
+        if (cfg.peer) { lobby.net.send(cfg.peer, { t: 'kicked' }); const id = cfg.peer; setTimeout(() => lobby?.net.kick(id), 300); }
+        lobby.players[p] = openSeat();
+        renderLobby();
+        broadcastLobby();
+      };
+      row.appendChild(kick);
+    }
+    wrap.appendChild(row);
+  });
+  $$('#segLobbyBoard button').forEach((b) => {
+    b.classList.toggle('on', b.dataset.v === lobby.board);
+    b.disabled = !host;
+  });
+  $('#lobbyBoardField').classList.toggle('hidden', !!lobby.match);
+  $('#btnLobbyStart').classList.toggle('hidden', !host);
+  $('#lobbyTitle').textContent = lobby.match ? 'Online match' : 'Room';
+  $('.code-box').classList.toggle('hidden', !!lobby.match);
+  if (lobby.match) {
+    const n = remoteCount();
+    $('#btnLobbyStart').textContent = n ? 'Start now' : 'Play with computers';
+    $('#lobbyNote').textContent = !host ? 'Match found! The game starts in a moment…'
+      : n ? `Match found! Starting in ${lobby.countdownLeft ?? 15}s… (more players can still join)` : 'Waiting for other players to join… (or start now against computers)';
+  } else {
+    $('#btnLobbyStart').textContent = 'Start game';
+    $('#lobbyNote').textContent = host ? 'Share the code. Friends join from “Play with Friends”. Open seats left empty are removed.' : 'Waiting for the host to start…';
+  }
+}
+
+$$('#segLobbyBoard button').forEach((b) => b.addEventListener('click', () => {
+  if (lobby?.role !== 'host') return;
+  sfx.click();
+  lobby.board = b.dataset.v;
+  renderLobby();
+  broadcastLobby();
+}));
+
+$('#btnShare').addEventListener('click', async () => {
+  sfx.click();
+  const code = $('#lobbyCode').textContent;
+  const url = `${location.origin}${location.pathname}?room=${code}`;
+  try {
+    if (navigator.share) await navigator.share({ title: 'Snakes & Ladders 3D', text: `Join my Snakes & Ladders game! Room code ${code}`, url });
+    else { await navigator.clipboard.writeText(url); $('#lobbyMsg').textContent = 'Link copied!'; setTimeout(() => { $('#lobbyMsg').textContent = ''; }, 2000); }
+  } catch { /* cancelled */ }
+});
+
+$('#btnLobbyStart').addEventListener('click', () => { sfx.click(); startLobbyGame(); });
+function startLobbyGame() {
+  if (!lobby || lobby.role !== 'host') return;
+  stopMatchTimers();
+  // a match nobody else joined: fill the table with computers
+  const fill = lobby.match && remoteCount() === 0 ? 'ai' : 'off';
+  const players = lobby.players.map((p, i) => {
+    const type = p.type === 'open' ? fill : p.type;
+    return { ...p, type, name: type === 'off' ? '' : type === 'ai' && !p.name ? `CPU ${COLOR_NAME[COLORS[i]]}` : p.name || COLOR_NAME[COLORS[i]] };
+  });
+  if (players.filter((p) => p.type !== 'off').length < 2) { $('#lobbyMsg').textContent = 'Need at least 2 players (add a Computer or wait for friends).'; sfx.error(); return; }
+  const { net, board } = lobby;
+  const state = newGameState(players, board);
+  net.broadcast({ t: 'start', players: publicPlayers(players), board, state, seq: 0 });
+  lobby = null;
+  settings.lastBoard = board;
+  applySettings();
+  startSession({ mode: 'host', players, board, net, mySeat: 0, state, seq: 0 });
+}
+
+$('#btnLobbyLeave').addEventListener('click', () => {
+  sfx.click();
+  stopMatchTimers();
+  if (matchSearch) matchSearch.cancelled = true;
+  leaveOnline();
+  lobby?.net.close();
+  lobby = null;
+  show('#scrMenu');
+});
+
+// ----- player side
+function wireClient(net) {
+  let mySeat = -1;
+  const bail = (why) => {
+    if (net.matching && !session) {
+      // that match filled up or started: quietly look for another
+      net.close();
+      drop(ONLINE_KEY);
+      lobby = null;
+      show('#scrMatch');
+      findMatch();
+      return;
+    }
+    net.close();
+    drop(ONLINE_KEY);
+    setNetBanner(null);
+    const inGame = !!session || !!lobby;
+    lobby = null;
+    if (session) { session.net = null; endSession(); }
+    show('#scrMenu');
+    refreshMenu();
+    if (inGame) alert(why); else { show('#scrOnline', true); $('#onlineMsg').textContent = why; }
+  };
+  net.on('message', (msg) => {
+    if (!msg || typeof msg !== 'object') return;
+    switch (msg.t) {
+      case 'welcome':
+        mySeat = msg.seat;
+        setNetBanner(null);
+        if (!session) {
+          lobby = { role: 'client', net, mySeat, match: isMatchCode(net.code), board: lobby?.board || 'medium', players: lobby?.players || [0, 1, 2, 3].map(() => openSeat()) };
+          $('#lobbyCode').textContent = net.code;
+          renderLobby();
+          show('#scrLobby', true);
+        }
+        break;
+      case 'lobby':
+        if (lobby) { lobby.players = msg.players; lobby.board = msg.board || lobby.board; renderLobby(); }
+        break;
+      case 'full': bail(msg.why || 'Room is full.'); break;
+      case 'kicked': bail('You were removed from the room.'); break;
+      case 'ended': bail('The host ended the game.'); break;
+      case 'start': {
+        lobby = null;
+        const players = msg.players.map((p) => ({ ...p }));
+        if (session) session.net = null; // keep the connection while replacing the session
+        startSession({ mode: 'client', players, board: msg.board, state: msg.state, net, mySeat, seq: msg.seq || 0 });
+        if (msg.resync) toast('Back in sync with the host', null, 1.2);
+        break;
+      }
+      case 'act':
+        if (session?.mode !== 'client') break;
+        if (msg.seq <= session.rx) break; // already have it
+        if (msg.seq > session.rx + 1) { net.send({ t: 'resync' }); break; } // missed some
+        session.rx = msg.seq;
+        session.queue.push(msg.v);
+        pumpClient();
+        break;
+      case 'players':
+        if (session) { msg.players.forEach((p, i) => Object.assign(session.players[i], p)); buildChips(); afterIdle(); }
+        break;
+      default:
+    }
+  });
+  // link lost: stay in the game and keep retrying quietly
+  net.on('down', () => setNetBanner('Connection lost — reconnecting…'));
+  net.on('up', () => {
+    const sv = load(ONLINE_KEY);
+    if (sv?.role === 'client') store(ONLINE_KEY, { ...sv, epoch: net.epoch, roomId: net.roomId });
+    setNetBanner('Reconnected — syncing…');
+    net.send({ t: 'hello', pid: PID, name: net.myName });
+  });
+}
+
+// ----- find online match (see Ludo: fixed public match rooms, merge when alone)
+let matchSearch = null;
+const slotOf = (code) => Number(code.split('-')[1]);
+const matchCodes = () => [...Array(MATCH_SLOTS).keys()].map(matchCode);
+
+function stopMatchTimers() {
+  if (!lobby) return;
+  clearInterval(lobby.countdownTimer);
+  clearInterval(lobby.mergeTimer);
+  lobby.countdownTimer = lobby.mergeTimer = null;
+  lobby.countdownLeft = null;
+}
+
+function matchCountdown() {
+  if (!lobby?.match || lobby.role !== 'host') return;
+  const n = remoteCount();
+  if (n >= 3) { startLobbyGame(); return; }
+  if (!n) { clearInterval(lobby.countdownTimer); lobby.countdownTimer = null; lobby.countdownLeft = null; renderLobby(); return; }
+  if (lobby.countdownTimer) return;
+  lobby.countdownLeft = 15;
+  lobby.countdownTimer = setInterval(() => {
+    if (!lobby) return;
+    lobby.countdownLeft--;
+    if (lobby.countdownLeft <= 0) { startLobbyGame(); return; }
+    renderLobby();
+  }, 1000);
+  renderLobby();
+}
+
+async function findMatch() {
+  const name = myName('#inpMatchName');
+  if (matchSearch) matchSearch.cancelled = true;
+  const me = { cancelled: false };
+  matchSearch = me;
+  const msg = (t) => { if (!me.cancelled) $('#matchMsg').textContent = t; };
+  $('#btnMatchGo').disabled = true;
+  msg('Looking for players…');
+  try {
+    while (!me.cancelled) {
+      const rooms = await scanRooms(matchCodes());
+      if (me.cancelled) return;
+      const waiting = rooms.filter((r) => r.match && !r.started && r.open > 0)
+        .sort((a, b) => b.players - a.players || slotOf(a.code) - slotOf(b.code));
+      for (const r of waiting) {
+        msg(`Joining ${r.name}'s match…`);
+        if (await connectAsPlayer(r.code, name, { matching: true })) return;
+        if (me.cancelled) return;
+      }
+      const taken = new Set(rooms.map((r) => r.code));
+      for (const code of matchCodes()) {
+        if (taken.has(code)) continue;
+        try { await hostMatch(code, name); return; } catch (e) {
+          if (e.type !== 'unavailable-id') throw e;
+        }
+      }
+      msg('All match rooms are busy, retrying…');
+      await sleep(3000);
+    }
+  } catch (e) {
+    msg(e.message || 'Could not reach the matchmaking server.');
+    sfx.error();
+  } finally {
+    if (matchSearch === me) matchSearch = null;
+    $('#btnMatchGo').disabled = false;
+  }
+}
+
+async function hostMatch(code, name) {
+  const net = new HostNet();
+  await net.startAt(code);
+  openHostLobby(net, name, true);
+  // alone in our room? keep an eye out for a better one to merge into
+  lobby.mergeTimer = setInterval(async () => {
+    const L = lobby;
+    if (!L || L.net !== net || L.busyMerge || remoteCount() > 0) return;
+    L.busyMerge = true;
+    try {
+      const rooms = (await scanRooms(matchCodes())).filter((r) => r.code !== code && r.match && !r.started && r.open > 0);
+      const better = rooms.find((r) => r.players > 1 || slotOf(r.code) < slotOf(code));
+      if (better && lobby === L && remoteCount() === 0) {
+        stopMatchTimers();
+        net.close();
+        lobby = null;
+        drop(ONLINE_KEY);
+        $('#matchMsg').textContent = `Joining ${better.name}'s match…`;
+        show('#scrMatch');
+        if (!(await connectAsPlayer(better.code, name, { matching: true }))) findMatch();
+      }
+    } catch { /* try again next tick */ }
+    L.busyMerge = false;
+  }, 7000);
+}
+
+$('#btnMatch').addEventListener('click', () => {
+  sfx.click();
+  $('#inpMatchName').value = load(NAME_KEY) || '';
+  $('#matchMsg').textContent = '';
+  show('#scrMatch', true);
+});
+$('#btnMatchGo').addEventListener('click', () => { sfx.click(); findMatch(); });
+$('#btnMatchCancel').addEventListener('click', () => {
+  sfx.click();
+  if (matchSearch) matchSearch.cancelled = true;
+  matchSearch = null;
+  $('#matchMsg').textContent = '';
+  $('#btnMatchGo').disabled = false;
+  back();
+});
+
+// ----- put an online game back after a reload (host or player)
+async function resumeOnline(sv) {
+  $('#inpName').value = load(NAME_KEY) || '';
+  show('#scrOnline', true);
+  $('#onlineMsg').textContent = `Reconnecting to room…`;
+  if (sv.role === 'client') {
+    if (await connectAsPlayer(sv.code, sv.name, { patient: true, epoch: sv.epoch || 0, roomId: sv.roomId || null })) $('#onlineMsg').textContent = 'Rejoined! Syncing with host…';
+    else { drop(ONLINE_KEY); $('#onlineMsg').textContent = 'Could not rejoin the room. It may have ended.'; }
+    return;
+  }
+  const net = new HostNet();
+  try {
+    await net.start(sv.code, sv.epoch || 0, sv.roomId || null);
+  } catch (e) {
+    net.close();
+    drop(ONLINE_KEY);
+    $('#onlineMsg').textContent = e.message;
+    return;
+  }
+  wireHost(net);
+  // everyone else is "away" until their device reconnects
+  const players = sv.players.map((p) => ({ ...p, peer: null, away: p.type === 'remote' }));
+  if (sv.state && sv.state.phase !== 'over') {
+    startSession({ mode: 'host', players, board: sv.board, net, mySeat: 0, state: sv.state, seq: sv.seq || 0 });
+    toast('Room restored — players are reconnecting', null, 2.2);
+  } else {
+    lobby = { role: 'host', net, mySeat: 0, match: !!sv.match, board: sv.board || 'medium', players: players.map((p) => (sv.state && p.type === 'off' ? openSeat() : p)) };
+    lobby.players.forEach((p, seat) => {
+      if (p.away) awayTimers.set(seat, setTimeout(() => { if (lobby?.players[seat]?.away) { lobby.players[seat] = openSeat(); renderLobby(); broadcastLobby(); } }, 60000));
+    });
+    $('#lobbyCode').textContent = sv.code;
+    renderLobby();
+    show('#scrLobby', true);
+    saveOnline();
+  }
+}
+
 // ---------------------------------------------------------------- menu & attract mode
 function refreshMenu() {
   const sv = load(SAVE_KEY);
@@ -638,6 +1267,15 @@ document.addEventListener('visibilitychange', () => {
 attract();
 refreshMenu();
 show('#scrMenu');
+const roomParam = new URLSearchParams(location.search).get('room');
+const savedOnline = load(ONLINE_KEY);
+if (savedOnline?.code && !roomParam) resumeOnline(savedOnline);
+else if (roomParam) {
+  $('#inpName').value = load(NAME_KEY) || '';
+  $('#inpCode').value = roomParam.toUpperCase().slice(0, 5);
+  show('#scrOnline', true);
+  history.replaceState(null, '', location.pathname);
+}
 requestAnimationFrame(() => $('#loading').classList.add('gone'));
 setTimeout(() => $('#loading').remove(), 800);
 
